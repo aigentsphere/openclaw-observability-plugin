@@ -2,22 +2,21 @@
  * LLM SDK instrumentation — wraps Anthropic/OpenAI streaming calls
  * to produce GenAI-standard OTel spans.
  *
- * Key insight: OpenClaw calls `client.messages.stream()` not `.create()`.
- * `.stream()` returns a MessageStream that internally calls `.create()`.
- * Wrapping `.create()` with `.then()` breaks the `APIPromise.withResponse()`
- * chain. So we wrap `.stream()` instead — it's the real entry point.
- *
- * The MessageStream emits a 'finalMessage' event with full usage data.
+ * CRITICAL: OpenClaw is an ESM application. pi-ai does:
+ *   import Anthropic from "@anthropic-ai/sdk"  → loads index.mjs (ESM)
+ * But createRequire() loads index.js (CJS) — a DIFFERENT module instance.
+ * We MUST use dynamic import() to patch the same ESM prototype that pi-ai uses.
  */
 
-import { createRequire } from "node:module";
+import { appendFileSync } from "node:fs";
 import { trace, SpanKind, SpanStatusCode, context } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/api";
 import type { OtelObservabilityConfig } from "./config.js";
 
-const openclawRequire = createRequire(
-  "/home/hrexed/.npm-global/lib/node_modules/openclaw/package.json"
-);
+const DIAG_FILE = "/tmp/otel-genai-diag.log";
+function diag(msg: string) {
+  try { appendFileSync(DIAG_FILE, `${new Date().toISOString()} ${msg}\n`); } catch {}
+}
 
 let initialized = false;
 
@@ -29,17 +28,24 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
   initialized = true;
   let patchedCount = 0;
 
-  // ── Anthropic SDK ─────────────────────────────────────────────────
+  // ── Anthropic SDK (ESM) ───────────────────────────────────────────
   try {
-    const sdk = openclawRequire("@anthropic-ai/sdk");
+    // MUST use dynamic import() to get the same module instance as pi-ai
+    const sdk = await import("@anthropic-ai/sdk");
     const Anthropic = sdk.Anthropic || sdk.default;
 
-    // Wrap .stream() — the method OpenClaw actually calls
+    if (!Anthropic?.Messages?.prototype) {
+      logger.warn("[otel] Anthropic SDK loaded but Messages.prototype not found");
+      diag("WARN: Messages.prototype not found on ESM import");
+    }
+
+    // Wrap .stream() — the method OpenClaw/pi-ai actually calls
     if (Anthropic?.Messages?.prototype?.stream) {
       const origStream = Anthropic.Messages.prototype.stream;
 
       Anthropic.Messages.prototype.stream = function patchedStream(this: any, body: any, options?: any) {
         const model = body?.model || "unknown";
+        diag(`🔥 stream() called, model=${model}`);
         const tracer = trace.getTracer("openclaw-genai", "0.1.0");
         const span = tracer.startSpan(`chat ${model}`, {
           kind: SpanKind.CLIENT,
@@ -60,6 +66,7 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
           // MessageStream emits 'finalMessage' with complete response + usage
           if (messageStream && typeof messageStream.on === "function") {
             messageStream.on("finalMessage", (msg: any) => {
+              diag(`✅ finalMessage: model=${msg?.model}, in=${msg?.usage?.input_tokens}, out=${msg?.usage?.output_tokens}`);
               try {
                 if (msg?.usage) {
                   span.setAttribute("gen_ai.usage.input_tokens", msg.usage.input_tokens || 0);
@@ -73,8 +80,8 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
               span.end();
             });
 
-            // Handle errors
             messageStream.on("error", (err: any) => {
+              diag(`❌ stream error: ${err?.message}`);
               try {
                 span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message || String(err) });
                 span.setAttribute("error.type", err?.constructor?.name || "Error");
@@ -82,20 +89,21 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
               span.end();
             });
 
-            // Handle abort — if stream ends without finalMessage
             messageStream.on("abort", () => {
+              diag("⚠️ stream aborted");
               try {
                 span.setStatus({ code: SpanStatusCode.ERROR, message: "Stream aborted" });
               } catch { /* ignore */ }
               span.end();
             });
           } else {
-            // Unexpected — end span immediately
+            diag("WARN: messageStream has no .on() method");
             span.end();
           }
 
           return messageStream;
         } catch (err: any) {
+          diag(`❌ stream() threw: ${err?.message}`);
           span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
           span.end();
           throw err;
@@ -103,29 +111,24 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
       };
 
       patchedCount++;
-      logger.info("[otel] ✅ Anthropic Messages.stream wrapped (GenAI spans with usage)");
+      diag(`stream patched OK (ESM), orig name was: ${origStream.name}`);
+      logger.info("[otel] ✅ Anthropic Messages.stream wrapped (ESM, GenAI spans with usage)");
     }
 
-    // Also wrap non-streaming .create() for users who call it directly
+    // Also wrap non-streaming .create() 
     if (Anthropic?.Messages?.prototype?.create) {
       const origCreate = Anthropic.Messages.prototype.create;
 
-      // Use a non-invasive approach: wrap but preserve the APIPromise type
-      const origCreateDescriptor = Object.getOwnPropertyDescriptor(
-        Anthropic.Messages.prototype, "create"
-      );
-
-      // We'll add span tracking via a side-channel, not by wrapping the Promise
       Anthropic.Messages.prototype.create = function patchedCreate(this: any, body: any, options?: any) {
         const isStream = body?.stream === true;
 
         // For stream: true, the .stream() wrapper handles it
-        // Only instrument non-streaming calls here
         if (isStream) {
           return origCreate.call(this, body, options);
         }
 
         const model = body?.model || "unknown";
+        diag(`🔥 create() called (non-stream), model=${model}`);
         const tracer = trace.getTracer("openclaw-genai", "0.1.0");
         const span = tracer.startSpan(`chat ${model}`, {
           kind: SpanKind.CLIENT,
@@ -139,13 +142,9 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
           },
         });
 
-        // Call original and get APIPromise
         const result = origCreate.call(this, body, options);
 
-        // Use .finally-style approach to capture result without breaking the chain
-        // APIPromise supports .then/.catch/.finally
         if (result && typeof result.then === "function") {
-          // Track completion without altering the return type
           result.then(
             (res: any) => {
               try {
@@ -161,27 +160,26 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
               span.end();
             },
             (err: any) => {
-              try {
-                span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
-              } catch { /* ignore */ }
+              try { span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message }); } catch { /* ignore */ }
               span.end();
             }
           );
         }
 
-        // Return the ORIGINAL APIPromise unchanged — preserves .withResponse() etc.
+        // Return ORIGINAL APIPromise — preserves .withResponse()
         return result;
       };
 
-      logger.info("[otel] ✅ Anthropic Messages.create wrapped (non-streaming GenAI spans)");
+      logger.info("[otel] ✅ Anthropic Messages.create wrapped (ESM, non-streaming)");
     }
   } catch (err) {
     logger.warn(`[otel] Anthropic SDK not available: ${err instanceof Error ? err.message : String(err)}`);
+    diag(`Anthropic import failed: ${err}`);
   }
 
-  // ── OpenAI SDK ────────────────────────────────────────────────────
+  // ── OpenAI SDK (ESM) ─────────────────────────────────────────────
   try {
-    const sdk = openclawRequire("openai");
+    const sdk = await import("openai");
     const OpenAI = sdk.OpenAI || sdk.default;
 
     if (OpenAI?.Chat?.Completions?.prototype?.create) {
@@ -226,7 +224,7 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
       };
 
       patchedCount++;
-      logger.info("[otel] ✅ OpenAI Chat.Completions.create wrapped");
+      logger.info("[otel] ✅ OpenAI Chat.Completions.create wrapped (ESM)");
     }
   } catch {
     // Not available — fine
@@ -234,7 +232,7 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
 
   // ── Bedrock SDK ───────────────────────────────────────────────────
   try {
-    const sdk = openclawRequire("@aws-sdk/client-bedrock-runtime");
+    const sdk = await import("@aws-sdk/client-bedrock-runtime");
     if (sdk?.BedrockRuntimeClient?.prototype?.send) {
       const origSend = sdk.BedrockRuntimeClient.prototype.send;
 
@@ -257,12 +255,12 @@ export async function initOpenLLMetry(config: OtelObservabilityConfig, logger: a
       };
 
       patchedCount++;
-      logger.info("[otel] ✅ Bedrock send wrapped");
+      logger.info("[otel] ✅ Bedrock send wrapped (ESM)");
     }
   } catch { /* Not available */ }
 
   if (patchedCount > 0) {
-    logger.info(`[otel] ${patchedCount} LLM SDK(s) instrumented`);
+    logger.info(`[otel] ${patchedCount} LLM SDK(s) instrumented via ESM dynamic import`);
   } else {
     logger.warn("[otel] No LLM SDKs instrumented");
   }
