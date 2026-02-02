@@ -4,22 +4,27 @@
  * Usage:
  *   NODE_OPTIONS="--import /path/to/preload.mjs" openclaw gateway start
  *
- * CRITICAL: Must import the IITM hook FIRST to register ESM loader hooks.
- * Without this, instrumentations cannot intercept ESM module imports
- * (like @anthropic-ai/sdk/index.mjs which pi-ai loads via ESM import).
+ * CRITICAL: In Node 22+, ESM loader hooks must be registered via
+ * register() from node:module. Simply importing hook.mjs doesn't work.
  */
 
-// Step 1: Register ESM loader hooks (import-in-the-middle)
-// This MUST be imported before any instrumented modules are loaded.
-import '@opentelemetry/instrumentation/hook.mjs';
+import { register } from 'node:module';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+// Step 1: Register IITM as an ESM module loader hook
+// This MUST happen before any instrumented modules are imported.
+const require = createRequire(import.meta.url);
+const iitmHookPath = require.resolve('import-in-the-middle/hook.mjs');
+register(pathToFileURL(iitmHookPath).href, { parentURL: import.meta.url });
 
 // Step 2: Set up the OTel SDK with GenAI instrumentations
-import { NodeSDK } from "@opentelemetry/sdk-node";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-node";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import { AnthropicInstrumentation } from "@traceloop/instrumentation-anthropic";
-import { OpenAIInstrumentation } from "@traceloop/instrumentation-openai";
+const { NodeSDK } = await import("@opentelemetry/sdk-node");
+const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-proto");
+const { BatchSpanProcessor } = await import("@opentelemetry/sdk-trace-node");
+const { resourceFromAttributes } = await import("@opentelemetry/resources");
+const { AnthropicInstrumentation } = await import("@traceloop/instrumentation-anthropic");
+const { OpenAIInstrumentation } = await import("@traceloop/instrumentation-openai");
 
 const OTLP_ENDPOINT = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318";
 const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || "openclaw-gateway";
@@ -51,4 +56,4 @@ globalThis.__OPENCLAW_OTEL_PRELOAD_ACTIVE = true;
 process.on("SIGTERM", () => sdk.shutdown());
 process.on("SIGINT", () => sdk.shutdown());
 
-console.log(`[otel-preload] GenAI instrumentation registered with ESM hooks (endpoint=${OTLP_ENDPOINT})`);
+console.log(`[otel-preload] GenAI instrumentation active (endpoint=${OTLP_ENDPOINT}, IITM loader registered)`);
