@@ -261,16 +261,27 @@ export function registerHooks(
         for (const msg of messages) {
           if (msg?.role === "assistant" && msg?.usage) {
             const u = msg.usage;
-            if (typeof u.inputTokens === "number") totalInputTokens += u.inputTokens;
-            if (typeof u.input_tokens === "number") totalInputTokens += u.input_tokens;
-            if (typeof u.outputTokens === "number") totalOutputTokens += u.outputTokens;
-            if (typeof u.output_tokens === "number") totalOutputTokens += u.output_tokens;
+            // pi-ai stores usage as .input/.output (normalized names)
+            if (typeof u.input === "number") totalInputTokens += u.input;
+            // Also check alternative field names used by other providers
+            else if (typeof u.inputTokens === "number") totalInputTokens += u.inputTokens;
+            else if (typeof u.input_tokens === "number") totalInputTokens += u.input_tokens;
+
+            if (typeof u.output === "number") totalOutputTokens += u.output;
+            else if (typeof u.outputTokens === "number") totalOutputTokens += u.outputTokens;
+            else if (typeof u.output_tokens === "number") totalOutputTokens += u.output_tokens;
+
+            // Also capture cache tokens if available
+            if (typeof u.cacheRead === "number") totalInputTokens += u.cacheRead;
+            if (typeof u.cacheWrite === "number") totalInputTokens += u.cacheWrite;
           }
           // Grab model from the last assistant message
           if (msg?.role === "assistant" && msg?.model) {
             model = msg.model;
           }
         }
+
+        logger.debug?.(`[otel] agent_end tokens: input=${totalInputTokens}, output=${totalOutputTokens}, model=${model}, assistantMsgs=${messages.filter((m:any) => m?.role === "assistant").length}`);
 
         const sessionCtx = sessionContextMap.get(sessionKey);
 

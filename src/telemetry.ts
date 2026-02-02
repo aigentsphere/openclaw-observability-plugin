@@ -132,6 +132,9 @@ export function initTelemetry(config: OtelObservabilityConfig, logger: any): Tel
       ],
     });
 
+    // Register as global meter provider so metrics.getMeter() returns a real meter
+    metrics.setGlobalMeterProvider(meterProvider);
+
     logger.info(`[otel] Metrics exporter → ${metricsEndpoint} (${config.protocol}, interval=${config.metricsIntervalMs}ms)`);
   }
 
