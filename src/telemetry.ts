@@ -102,8 +102,11 @@ export function initTelemetry(config: OtelObservabilityConfig, logger: any): Tel
         ? new OTLPTraceExporterGRPC({ url: traceEndpoint, headers: config.headers })
         : new OTLPTraceExporterHTTP({ url: traceEndpoint, headers: config.headers });
 
-    tracerProvider = new NodeTracerProvider({ resource });
-    tracerProvider.addSpanProcessor(new BatchSpanProcessor(traceExporter));
+    // SDK v2: pass spanProcessors in constructor (addSpanProcessor was removed)
+    tracerProvider = new NodeTracerProvider({
+      resource,
+      spanProcessors: [new BatchSpanProcessor(traceExporter)],
+    });
     tracerProvider.register();
 
     logger.info(`[otel] Trace exporter → ${traceEndpoint} (${config.protocol})`);

@@ -5,3 +5,4 @@ dist/
 *.js.map
 !collector/**
 .env
+collector/otelcol-contrib_0.144.0_linux_amd64.deb
