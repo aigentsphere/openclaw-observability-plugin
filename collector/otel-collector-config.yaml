@@ -11,18 +11,45 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      load:
+      network:
+      filesystem:
+      process:
+      processes:
+      system:
 
 processors:
+  resourcedetection/system:
+    detectors: ["system"]
+    system:
+      hostname_sources: ["os"]
+
   batch:
     timeout: 10s
     send_batch_size: 1024
     send_batch_max_size: 2048
 
+  cumulativetodelta: {}
+
+  filter:
+    error_mode: ignore
+    metrics:
+      metric:
+        - 'type == METRIC_DATA_TYPE_SUMMARY'
   # Optional: add resource attributes
   resource:
     attributes:
       - key: deployment.environment
         value: "production"
+        action: upsert
+      - key: service.type
+        value: "clawdbot"
         action: upsert
 
   # Optional: filter out noisy spans
@@ -38,9 +65,9 @@ exporters:
   # Replace with your Dynatrace environment URL and access token.
   # Token needs: openTelemetryTrace.ingest, metrics.ingest, logs.ingest
   otlphttp/dynatrace:
-    endpoint: "${DYNATRACE_ENDPOINT}"
+    endpoint: "${env:DT_ENDPOINT}"
     headers:
-      Authorization: "Api-Token ${DYNATRACE_API_TOKEN}"
+      Authorization: "Api-Token ${env:DT_API_TOKEN}"
 
   # ── Debug exporter (logs to stdout — useful for development) ──────
   debug:
@@ -55,21 +82,20 @@ exporters:
 
 service:
   telemetry:
-    logs:
-      level: info
-
+    metrics:
+      level: none
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch, resource]
+      processors: [resourcedetection/system, resource, batch ]
       exporters: [otlphttp/dynatrace, debug]
 
     metrics:
-      receivers: [otlp]
-      processors: [batch, resource]
+      receivers: [otlp, hostmetrics]
+      processors: [resourcedetection/system, resource, filter, cumulativetodelta ,batch]
       exporters: [otlphttp/dynatrace, debug]
 
     logs:
       receivers: [otlp]
-      processors: [batch, resource]
+      processors: [resourcedetection/system, resource,batch]
       exporters: [otlphttp/dynatrace, debug]
