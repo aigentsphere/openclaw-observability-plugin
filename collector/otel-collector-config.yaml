@@ -11,6 +11,7 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+
   hostmetrics:
     collection_interval: 30s
     scrapers:
@@ -23,6 +24,58 @@ receivers:
       process:
       processes:
       system:
+
+  # ── OpenClaw gateway logs ──────────────────────────────────────────
+  # Picks up daily log files from /tmp/openclaw/
+  # JSON format: { "0": "<message>", "_meta": { "logLevelName", "date", ... }, "time": "..." }
+  filelog/openclaw:
+    include:
+      - /tmp/openclaw/openclaw-*.log
+    start_at: end
+    include_file_name: true
+    include_file_path: true
+    operators:
+      # Parse each line as JSON
+      - type: json_parser
+        parse_from: body
+        timestamp:
+          parse_from: attributes.time
+          layout: '%Y-%m-%dT%H:%M:%S.%LZ'
+        severity:
+          parse_from: attributes._meta.logLevelName
+          mapping:
+            debug: DEBUG
+            info: INFO
+            warn: WARN
+            error: ERROR
+            fatal: FATAL
+      # Move the log message to body
+      - type: move
+        from: attributes.0
+        to: body
+      # Extract useful metadata
+      - type: move
+        from: attributes._meta.name
+        to: attributes.logger.name
+      - type: move
+        from: attributes._meta.path.filePath
+        to: attributes.code.filepath
+      - type: move
+        from: attributes._meta.path.fileLine
+        to: attributes.code.lineno
+      - type: move
+        from: attributes._meta.path.method
+        to: attributes.code.function
+      # Clean up raw _meta (already extracted what we need)
+      - type: remove
+        field: attributes._meta
+      # Add resource attributes
+      - type: add
+        field: resource.service.name
+        value: openclaw-gateway
+      - type: add
+        field: resource.service.version
+        value: "0.1.0"
 
 processors:
   resourcedetection/system:
@@ -96,6 +149,6 @@ service:
       exporters: [otlphttp/dynatrace, debug]
 
     logs:
-      receivers: [otlp]
-      processors: [resourcedetection/system, resource,batch]
+      receivers: [otlp, filelog/openclaw]
+      processors: [resourcedetection/system, resource, batch]
       exporters: [otlphttp/dynatrace, debug]
