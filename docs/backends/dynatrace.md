@@ -1,172 +1,168 @@
-# Dynatrace Integration
+# Dynatrace Setup
 
-Dynatrace has native OTLP ingest — you can export directly or via the included OTel Collector.
+Send OpenClaw telemetry directly to Dynatrace using OTLP.
 
 ## Prerequisites
 
-1. A Dynatrace environment (SaaS or Managed)
-2. An access token with these scopes:
-    - `openTelemetryTrace.ingest`
-    - `metrics.ingest`
-    - `logs.ingest`
+- Dynatrace environment (SaaS or Managed)
+- API token with ingest permissions
 
-### Create an Access Token
+## Create API Token
 
-1. Go to your Dynatrace environment
-2. Navigate to **Access Tokens** (Settings → Integration → Access Tokens, or via Manage → Access Tokens)
-3. Click **Generate new token**
-4. Name it (e.g., `openclaw-otel`)
-5. Add scopes: `openTelemetryTrace.ingest`, `metrics.ingest`, `logs.ingest`
-6. Click **Generate token** and copy it
+1. Go to **Settings** → **Access tokens**
+2. Click **Generate new token**
+3. Add scopes:
+   - `metrics.ingest`
+   - `logs.ingest`
+   - `openTelemetryTrace.ingest`
+4. Copy the token (starts with `dt0c01.`)
 
-## Option A: Direct Export (Simplest)
+## Configure OpenClaw
 
-Point the plugin directly at Dynatrace's OTLP endpoint.
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
-  "plugins": {
-    "entries": {
-      "otel-observability": {
-        "enabled": true,
-        "config": {
-          "endpoint": "https://<YOUR_ENV>.live.dynatrace.com/api/v2/otlp",
-          "protocol": "http",
-          "serviceName": "openclaw-gateway",
-          "headers": {
-            "Authorization": "Api-Token <YOUR_ACCESS_TOKEN>"
-          },
-          "traces": true,
-          "metrics": true,
-          "logs": true
-        }
-      }
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "https://{environment-id}.live.dynatrace.com/api/v2/otlp",
+      "headers": {
+        "Authorization": "Api-Token dt0c01.XXXXXXXX"
+      },
+      "serviceName": "openclaw-gateway",
+      "traces": true,
+      "metrics": true,
+      "logs": true
     }
   }
 }
 ```
 
 Replace:
+- `{environment-id}` — Your Dynatrace environment ID (e.g., `abc12345`)
+- `dt0c01.XXXXXXXX` — Your API token
 
-- `<YOUR_ENV>` — your Dynatrace environment ID (e.g., `abc12345`)
-- `<YOUR_ACCESS_TOKEN>` — the token you created above
+### Dynatrace Managed
 
-!!! note "SaaS vs Managed"
-    - **SaaS:** `https://<env-id>.live.dynatrace.com/api/v2/otlp`
-    - **Managed:** `https://<your-domain>/e/<env-id>/api/v2/otlp`
-    - **ActiveGate:** `https://<activegate-host>:9999/e/<env-id>/api/v2/otlp`
-
-## Option B: Via OTel Collector (Recommended)
-
-Use the included Docker Compose setup.
-
-### 1. Set Environment Variables
-
-```bash
-export DYNATRACE_ENDPOINT=https://<YOUR_ENV>.live.dynatrace.com/api/v2/otlp
-export DYNATRACE_API_TOKEN=<YOUR_ACCESS_TOKEN>
-```
-
-### 2. Start the Collector
-
-```bash
-cd openclaw-observability-plugin
-docker compose up -d
-```
-
-### 3. Configure the Plugin
-
-Point the plugin at the local collector:
+For Dynatrace Managed, use your ActiveGate URL:
 
 ```json
 {
-  "plugins": {
-    "entries": {
-      "otel-observability": {
-        "enabled": true,
-        "config": {
-          "endpoint": "http://localhost:4318",
-          "protocol": "http",
-          "serviceName": "openclaw-gateway"
-        }
-      }
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "https://{your-activegate}/e/{environment-id}/api/v2/otlp",
+      "headers": {
+        "Authorization": "Api-Token dt0c01.XXXXXXXX"
+      },
+      "serviceName": "openclaw-gateway"
     }
   }
 }
 ```
 
-No auth headers needed — the collector handles authentication with Dynatrace.
-
-### 4. Verify
-
-Check the collector logs:
+## Restart Gateway
 
 ```bash
-docker compose logs -f otel-collector
+openclaw gateway restart
 ```
 
-You should see export confirmations.
+## Verify in Dynatrace
 
-## Viewing Data in Dynatrace
+### Find Your Service
 
-### Traces
+1. Go to **Services** in Dynatrace
+2. Search for `openclaw-gateway`
+3. Click to view service details
 
-1. Open **Distributed Traces** (or search for it)
+### View Traces
+
+1. Go to **Distributed traces**
 2. Filter by service: `openclaw-gateway`
-3. You'll see traces for LLM calls, tool executions, and commands
+3. Click a trace to see spans
 
-### GenAI Observability
+### View Metrics
 
-Dynatrace has a dedicated GenAI observability view:
-
-1. Navigate to **Apps → GenAI Observability**
-2. This view is specifically designed for LLM traces and shows:
-    - Model usage breakdown
-    - Token consumption
-    - Latency per model
-    - Error rates
-
-### Metrics
-
-1. Open **Metrics Explorer** (or Data Explorer)
-2. Search for `openclaw.*`
+1. Go to **Explore** → **Metrics**
+2. Search for `openclaw.`
 3. Available metrics:
-    - `openclaw.llm.tokens.total`
-    - `openclaw.llm.duration`
-    - `openclaw.tool.calls`
-    - etc.
+   - `openclaw.tokens` — Token usage
+   - `openclaw.cost.usd` — Cost tracking
+   - `openclaw.run.duration_ms` — Agent run times
+   - `openclaw.message.*` — Message processing
+   - `openclaw.queue.*` — Queue metrics
 
-### Dashboards
+### Create Dashboard
 
 Create a dashboard with:
 
+```sql
+-- Token usage by model
+timeseries sum(openclaw.tokens), by:{openclaw.model, openclaw.token}
+
+-- Cost over time
+timeseries sum(openclaw.cost.usd), by:{openclaw.model}
+
+-- Agent run duration
+timeseries avg(openclaw.run.duration_ms), by:{openclaw.model}
 ```
-# Token usage over time
-timeseries avg(openclaw.llm.tokens.total), by:{gen_ai.request.model}
 
-# LLM latency
-timeseries percentile(openclaw.llm.duration, 50, 95, 99)
+### View Logs
 
-# Tool usage
-timeseries sum(openclaw.tool.calls), by:{tool.name}
+1. Go to **Logs**
+2. Filter: `dt.entity.service = "openclaw-gateway"`
+3. View log records with severity and attributes
 
-# Error rate
-timeseries sum(openclaw.llm.errors) / sum(openclaw.llm.requests) * 100
+## Example DQL Queries
+
+### Token Usage by Model
+```sql
+fetch spans
+| filter dt.entity.service == "openclaw-gateway"
+| summarize tokens = sum(openclaw.tokens.total), by:{openclaw.model}
+| sort tokens desc
+```
+
+### Average Run Duration
+```sql
+fetch spans
+| filter dt.entity.service == "openclaw-gateway"
+| filter matchesPhrase(span.name, "model")
+| summarize avg_duration = avg(openclaw.run.duration_ms)
+```
+
+### Error Rate
+```sql
+fetch logs
+| filter dt.entity.service == "openclaw-gateway"
+| filter loglevel == "ERROR"
+| summarize count = count()
 ```
 
 ## Troubleshooting
 
-### No data appearing?
+### No Data in Dynatrace?
 
-1. **Check the plugin:** `openclaw otel` — is it initialized?
-2. **Check connectivity:** Can the machine reach the Dynatrace endpoint?
-3. **Check the token:** Does it have the right scopes?
-4. **Check collector logs:** `docker compose logs -f` (if using collector)
+1. **Check token permissions**: Ensure all three scopes are enabled
+2. **Verify endpoint URL**: Should be `https://{env-id}.live.dynatrace.com/api/v2/otlp`
+3. **Test connectivity**:
+   ```bash
+   curl -v "https://{env-id}.live.dynatrace.com/api/v2/otlp/v1/traces" \
+     -H "Authorization: Api-Token dt0c01.xxx"
+   ```
 
-### 401 Unauthorized
+### Service Not Appearing?
 
-Your access token is missing or invalid. Regenerate it with the correct scopes.
+- Wait 2-5 minutes for service detection
+- Send a few messages to generate telemetry
+- Check Dynatrace logs for ingest errors
 
-### Traces appear but no metrics
+### 403 Forbidden?
 
-Ensure `metrics.ingest` scope is on the token and `metrics: true` is in the plugin config.
+Token lacks required scopes. Regenerate with all three:
+- `metrics.ingest`
+- `logs.ingest`
+- `openTelemetryTrace.ingest`

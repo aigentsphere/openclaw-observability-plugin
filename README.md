@@ -1,169 +1,143 @@
-# 🔭 OpenClaw Observability Plugin
+# OpenClaw Observability
 
-Full **OpenTelemetry** observability for [OpenClaw](https://github.com/openclaw/openclaw) AI agents — traces, metrics, and logs out of the box.
-
-Captures LLM token usage, agent turns, tool executions, and session lifecycle as connected OpenTelemetry traces and metrics. Exports everything via **OTLP** to any OpenTelemetry-compatible backend: Dynatrace, Grafana, Datadog, Honeycomb, and more.
-
-📖 **Full documentation:** [https://henrikrexed.github.io/openclaw-observability-plugin](https://henrikrexed.github.io/openclaw-observability-plugin)
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────┐
-│     OpenClaw Gateway         │
-│  ┌────────────────────────┐  │
-│  │  OTel Observability    │  │
-│  │  Plugin                │  │
-│  │  ├─ Connected Traces   │──┼──► OTLP ──► OTel Collector ──► Dynatrace
-│  │  │  (hooks-based)      │  │         │                    ├── Grafana
-│  │  ├─ Custom Metrics     │  │         │                    ├── Datadog
-│  │  └─ Logs               │  │         │                    └── any backend
-│  └────────────────────────┘  │
-└──────────────────────────────┘
-```
-
-## What You Get
-
-### 🔍 Traces — Connected Distributed Traces
-
-Every user message produces a full trace tree:
-
-```
-openclaw.request (root — full message lifecycle)
-├── openclaw.agent.turn (LLM processing)
-│   ├── gen_ai.usage.input_tokens: 4521
-│   ├── gen_ai.usage.output_tokens: 892
-│   ├── gen_ai.response.model: claude-opus-4-5
-│   ├── tool.exec (156ms)
-│   ├── tool.Read (12ms)
-│   └── tool.web_fetch (1200ms)
-└── openclaw.command.new (if session reset)
-```
-
-- **Agent turns** — model, token counts (input/output/cache), duration, success/error
-- **Tool executions** — individual spans per tool call with result metadata
-- **Session commands** — `/new`, `/reset`, `/stop` lifecycle events
-- **Gateway lifecycle** — startup events
-- **Parent-child relationships** — all spans connected under one trace per request
-
-### 📊 Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `openclaw.llm.tokens.prompt` | Counter | Prompt/input tokens by model |
-| `openclaw.llm.tokens.completion` | Counter | Completion/output tokens by model |
-| `openclaw.llm.tokens.total` | Counter | Total tokens (prompt + completion + cache) |
-| `openclaw.llm.requests` | Counter | LLM API request count |
-| `openclaw.tool.calls` | Counter | Tool invocation count |
-| `openclaw.tool.errors` | Counter | Tool error count |
-| `openclaw.agent.turn_duration` | Histogram | Agent turn duration (ms) |
-| `openclaw.messages.received` | Counter | Inbound messages by channel |
-| `openclaw.session.resets` | Counter | Session reset count |
-
-### 📋 Logs
-
-Structured gateway logs forwarded via OTel Collector's filelog receiver.
+OpenTelemetry observability for [OpenClaw](https://github.com/openclaw/openclaw) AI agents.
 
 ## Quick Start
 
-```bash
-# 1. Clone and install
-git clone https://github.com/henrikrexed/openclaw-observability-plugin.git
-cd openclaw-observability-plugin
-npm install
-
-# 2. Add plugin path to OpenClaw config
-# In ~/.openclaw/openclaw.json:
-{
-  "plugins": {
-    "load": { "paths": ["/path/to/openclaw-observability-plugin"] },
-    "entries": {
-      "otel-observability": {
-        "enabled": true,
-        "config": {
-          "endpoint": "http://localhost:4318",
-          "protocol": "http",
-          "serviceName": "openclaw-gateway",
-          "traces": true,
-          "metrics": true,
-          "logs": true
-        }
-      }
-    }
-  }
-}
-
-# 3. Start an OTel Collector (optional — see docs for direct export)
-export DYNATRACE_ENDPOINT=https://<YOUR_ENV>.live.dynatrace.com/api/v2/otlp
-export DYNATRACE_API_TOKEN=<YOUR_ACCESS_TOKEN>
-docker compose up -d
-
-# 4. Restart gateway
-openclaw gateway restart
-```
-
-See the [Getting Started guide](https://henrikrexed.github.io/openclaw-observability-plugin/getting-started/) for detailed instructions.
-
-## Configuration
+OpenClaw v2026.2+ includes **built-in OpenTelemetry support**. Add this to your `openclaw.json`:
 
 ```json
 {
-  "plugins": {
-    "entries": {
-      "otel-observability": {
-        "enabled": true,
-        "config": {
-          "endpoint": "http://localhost:4318",
-          "protocol": "http",
-          "serviceName": "openclaw-gateway",
-          "traces": true,
-          "metrics": true,
-          "logs": true,
-          "captureContent": false
-        }
-      }
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "http://localhost:4318",
+      "serviceName": "openclaw-gateway",
+      "traces": true,
+      "metrics": true,
+      "logs": true
     }
   }
 }
 ```
 
-See the full [Configuration Reference](https://henrikrexed.github.io/openclaw-observability-plugin/configuration/).
-
-## Known Limitations
-
-### No Per-LLM-Call Auto-Instrumentation
-
-The plugin uses OpenClaw's **hook-based API** to produce spans, not SDK-level monkey-patching. This means:
-
-- ✅ Token usage, model, duration per **agent turn** (aggregated across all LLM calls in a turn)
-- ❌ No individual `anthropic.chat` spans per LLM API call
-- ❌ No request/response content capture on LLM calls
-
-**Why?** OpenClaw uses ESM modules internally. Standard OTel auto-instrumentation (via [import-in-the-middle](https://github.com/DataDog/import-in-the-middle)) breaks `@mariozechner/pi-ai`'s named exports, crash-looping the gateway. See [the full technical writeup](https://github.com/henrikrexed/openclaw-observability-plugin/blob/main/docs/limitations.md) for details.
-
-A [feature request](https://github.com/openclaw/openclaw/issues) has been filed to add native LLM call events to the plugin API.
-
-## Backends
-
-| Backend | Setup Guide |
-|---------|-------------|
-| Dynatrace | [Dynatrace integration](https://henrikrexed.github.io/openclaw-observability-plugin/backends/dynatrace/) |
-| OTel Collector | [Collector setup](https://henrikrexed.github.io/openclaw-observability-plugin/backends/otel-collector/) |
-| Grafana / Tempo | [Grafana integration](https://henrikrexed.github.io/openclaw-observability-plugin/backends/grafana/) |
-| Any OTLP backend | [Generic OTLP](https://henrikrexed.github.io/openclaw-observability-plugin/backends/generic-otlp/) |
-
-## Development
+Then restart the gateway:
 
 ```bash
-# Type-check
-npm run typecheck
-
-# Clear jiti cache + restart for code changes
-rm -rf /tmp/jiti && openclaw gateway restart
+openclaw gateway restart
 ```
+
+That's it! Traces, metrics, and logs will be sent to your OTLP endpoint.
+
+## Telemetry Captured
+
+### Metrics
+- `openclaw.tokens` — Token usage by type (input/output/cache)
+- `openclaw.cost.usd` — Estimated model cost
+- `openclaw.run.duration_ms` — Agent run duration
+- `openclaw.context.tokens` — Context window usage
+- `openclaw.webhook.*` — Webhook processing stats
+- `openclaw.message.*` — Message processing stats
+- `openclaw.queue.*` — Queue depth and wait times
+- `openclaw.session.*` — Session state transitions
+
+### Traces
+Spans are created for:
+- Model usage (with token counts)
+- Webhook processing
+- Message processing
+- Stuck session detection
+
+### Logs
+All OpenClaw logs are forwarded via OTLP with:
+- Log level and severity
+- Code location (file, line, function)
+- Logger name and subsystem
+
+## Backend Examples
+
+### Dynatrace
+```json
+{
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "https://{your-environment-id}.live.dynatrace.com/api/v2/otlp",
+      "headers": {
+        "Authorization": "Api-Token {your-api-token}"
+      },
+      "serviceName": "openclaw-gateway",
+      "traces": true,
+      "metrics": true,
+      "logs": true
+    }
+  }
+}
+```
+
+### Grafana Cloud / Tempo
+```json
+{
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "https://otlp-gateway-{region}.grafana.net/otlp",
+      "headers": {
+        "Authorization": "Basic {base64-encoded-credentials}"
+      },
+      "serviceName": "openclaw-gateway",
+      "traces": true,
+      "metrics": true
+    }
+  }
+}
+```
+
+### Local OTel Collector
+```json
+{
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "http://localhost:4318",
+      "serviceName": "openclaw-gateway",
+      "traces": true,
+      "metrics": true,
+      "logs": true
+    }
+  }
+}
+```
+
+## Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `diagnostics.enabled` | boolean | false | Enable diagnostics system |
+| `diagnostics.otel.enabled` | boolean | false | Enable OTel export |
+| `diagnostics.otel.endpoint` | string | — | OTLP endpoint URL |
+| `diagnostics.otel.protocol` | string | "http/protobuf" | Protocol (http/protobuf or grpc) |
+| `diagnostics.otel.headers` | object | — | Custom headers (e.g., auth tokens) |
+| `diagnostics.otel.serviceName` | string | "openclaw" | OTel service name |
+| `diagnostics.otel.traces` | boolean | true | Enable trace export |
+| `diagnostics.otel.metrics` | boolean | true | Enable metrics export |
+| `diagnostics.otel.logs` | boolean | false | Enable log forwarding |
+| `diagnostics.otel.sampleRate` | number | 1.0 | Trace sampling rate (0.0-1.0) |
+| `diagnostics.otel.flushIntervalMs` | number | — | Export flush interval |
+
+## Documentation
+
+Full documentation: [docs/](./docs/)
+
+- [Getting Started](./docs/getting-started.md)
+- [Configuration](./docs/configuration.md)
+- [Architecture](./docs/architecture.md)
+- [Backends](./docs/backends/)
 
 ## License
 
-Apache 2.0
+MIT

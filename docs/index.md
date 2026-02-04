@@ -1,102 +1,99 @@
-# 🔭 OpenClaw Observability Plugin
+# OpenClaw Observability
 
-Full **OpenTelemetry** observability for [OpenClaw](https://github.com/openclaw/openclaw) AI agents — traces, metrics, and logs out of the box.
+OpenTelemetry observability for OpenClaw AI agents — traces, metrics, and logs.
 
-## Why?
+## Overview
 
-Running an AI agent in production without observability is flying blind. You need to know:
+OpenClaw v2026.2+ includes **built-in OpenTelemetry support** via the `diagnostics.otel` configuration. This enables you to:
 
-- **How much are LLM calls costing?** → Token usage metrics by model
-- **Why is the agent slow?** → Latency traces across agent turns and tool executions
-- **What tools are being used?** → Tool call frequency and error rates
-- **What's the agent actually doing?** → Full connected traces from message → agent turn → tools → response
+- **Track token usage** by model, agent, and channel
+- **Monitor costs** with estimated USD metrics
+- **Debug agent behavior** with distributed traces
+- **Centralize logs** with structured OTel log records
+- **Detect issues** like stuck sessions and webhook failures
 
-This plugin gives you all of that with **zero code changes** to your OpenClaw setup.
+## Quick Start
 
-## How It Works
+Add this to your `~/.openclaw/openclaw.json`:
 
-```mermaid
-flowchart LR
-    A[User Message] --> B[OpenClaw Gateway]
-    B --> C[Agent Turn<br/>LLM Processing]
-    B --> D[Tool Execution]
-    B --> E[Response]
-
-    C -->|Plugin hooks<br/>agent_end| F[OTel Spans]
-    D -->|Plugin hooks<br/>tool_result_persist| F
-    B -->|Counter/Histogram| G[OTel Metrics]
-
-    F --> H[OTLP Export]
-    G --> H
-
-    H --> I[OTel Collector]
-    I --> J[Dynatrace]
-    I --> K[Grafana]
-    I --> L[Any Backend]
+```json
+{
+  "diagnostics": {
+    "enabled": true,
+    "otel": {
+      "enabled": true,
+      "endpoint": "http://localhost:4318",
+      "serviceName": "openclaw-gateway",
+      "traces": true,
+      "metrics": true,
+      "logs": true
+    }
+  }
+}
 ```
 
-### Hook-Based Instrumentation
+Then restart:
 
-The plugin hooks into OpenClaw's plugin API to capture telemetry at key points in the agent lifecycle:
+```bash
+openclaw gateway restart
+```
 
-| Hook | What It Captures |
-|------|-----------------|
-| `message_received` | Creates root span for the request, records message count |
-| `before_agent_start` | Creates agent turn child span |
-| `tool_result_persist` | Creates tool execution spans with result metadata |
-| `agent_end` | Ends spans, extracts token usage from the LLM response |
-| `gateway:startup` | Records gateway startup event |
-| `command:new/reset/stop` | Records session lifecycle commands |
+See the [Getting Started Guide](getting-started.md) for full setup instructions.
 
-Every agent turn produces connected spans with token counts, model info, duration, and tool details — all linked under a single trace ID per request.
+## What Gets Captured
 
-### Token Usage Extraction
+### Metrics
 
-Token counts are extracted from the `agent_end` event's message array. Each assistant message carries usage data (`input`, `output`, `cacheRead`, `cacheWrite`) which the plugin records as both:
+| Metric | Description |
+|--------|-------------|
+| `openclaw.tokens` | Token usage by type (input/output/cache_read/cache_write) |
+| `openclaw.cost.usd` | Estimated model cost in USD |
+| `openclaw.run.duration_ms` | Agent run duration histogram |
+| `openclaw.context.tokens` | Context window limit and usage |
+| `openclaw.webhook.received` | Webhook requests received |
+| `openclaw.webhook.error` | Webhook processing errors |
+| `openclaw.message.queued` | Messages queued for processing |
+| `openclaw.message.processed` | Messages processed by outcome |
+| `openclaw.queue.depth` | Queue depth on enqueue/dequeue |
+| `openclaw.session.state` | Session state transitions |
+| `openclaw.session.stuck` | Sessions stuck in processing |
 
-- **Span attributes** — `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.total_tokens`, `gen_ai.response.model`
-- **OTel counter metrics** — `openclaw.llm.tokens.prompt`, `openclaw.llm.tokens.completion`, `openclaw.llm.tokens.total` (by model and agent)
+### Traces
 
-## Features at a Glance
+Spans are created for:
+- Model usage events (with token counts, cost, duration)
+- Webhook processing
+- Message processing
+- Stuck session detection
 
-| Feature | Description |
-|---------|-------------|
-| 🔍 **Connected Traces** | Full request lifecycle: message → agent turn → tools, all linked |
-| 📊 **Token Metrics** | Token usage counters by model (prompt, completion, cache, total) |
-| 🛠️ **Tool Traces** | Individual spans for every tool call with result metadata |
-| ⏱️ **Duration Histograms** | Agent turn and tool execution duration distributions |
-| 📋 **Logs** | Structured gateway logs via OTel Collector filelog receiver |
-| 🔒 **Privacy** | No prompt/completion content captured — only metadata |
-| 🔌 **Any Backend** | OTLP export to Dynatrace, Grafana, Datadog, Honeycomb, and more |
-| ⚡ **Zero Code** | Just install, configure, and restart — no code changes needed |
-| 🐳 **Collector Included** | Docker Compose + config for local OTel Collector |
+### Logs
 
-## Known Limitations
+All OpenClaw logs forwarded with:
+- Severity level (DEBUG, INFO, WARN, ERROR)
+- Subsystem name (agent, gateway, channel, etc.)
+- Code location (file, line, function)
 
-The plugin does **not** produce per-LLM-API-call spans (e.g., `anthropic.chat`). Token usage and model info are captured per **agent turn**, not per individual SDK call. See [Limitations](limitations.md) for the technical details and workarounds.
+## Supported Backends
 
-## Next Steps
+Works with any OTLP-compatible backend:
 
-<div class="grid cards" markdown>
+- **[Dynatrace](backends/dynatrace.md)** — Direct ingest via API
+- **[Grafana](backends/grafana.md)** — Tempo, Loki, Mimir stack
+- **Jaeger** — Distributed tracing
+- **Prometheus + Grafana** — Metrics visualization
+- **Honeycomb** — Observability platform
+- **New Relic** — APM and monitoring
+- **Any OTLP endpoint** — Local or cloud collectors
 
-- :material-rocket-launch: **[Getting Started](getting-started.md)**
+## Documentation
 
-    Install and configure the plugin in 5 minutes
+- [Getting Started](getting-started.md) — Setup in 5 minutes
+- [Configuration](configuration.md) — All options explained
+- [Architecture](architecture.md) — How it works
+- [Telemetry Reference](telemetry/) — Detailed metric/trace docs
 
-- :material-cog: **[Configuration](configuration.md)**
+## Source
 
-    All configuration options explained
+This documentation covers OpenClaw's built-in diagnostics OTel support, available in OpenClaw v2026.2.0+.
 
-- :material-chart-bar: **[Metrics Reference](telemetry/metrics.md)**
-
-    Complete list of exported metrics
-
-- :material-transit-connection-variant: **[Backends](backends/index.md)**
-
-    Connect to Dynatrace, Grafana, or any OTLP backend
-
-- :material-alert-circle: **[Limitations](limitations.md)**
-
-    Current constraints and planned improvements
-
-</div>
+GitHub: [openclaw/openclaw](https://github.com/openclaw/openclaw)
