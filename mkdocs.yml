@@ -68,6 +68,7 @@ nav:
   - Telemetry Reference:
     - Traces: telemetry/traces.md
     - Metrics: telemetry/metrics.md
+    - Token Usage: telemetry/tokens.md
   - Backends:
     - Overview: backends/index.md
     - Dynatrace: backends/dynatrace.md
