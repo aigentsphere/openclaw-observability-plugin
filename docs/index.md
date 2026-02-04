@@ -2,19 +2,35 @@
 
 OpenTelemetry observability for OpenClaw AI agents — traces, metrics, and logs.
 
-## Overview
+## Two Approaches
 
-OpenClaw v2026.2+ includes **built-in OpenTelemetry support** via the `diagnostics.otel` configuration. This enables you to:
+This documentation covers **two complementary approaches** to OpenClaw observability:
 
-- **Track token usage** by model, agent, and channel
-- **Monitor costs** with estimated USD metrics
-- **Debug agent behavior** with distributed traces
-- **Centralize logs** with structured OTel log records
-- **Detect issues** like stuck sessions and webhook failures
+### 1. Official Diagnostics Plugin (Built-in)
+
+OpenClaw v2026.2+ includes built-in OTel support via `diagnostics.otel` config. Best for:
+
+- ✅ Operational metrics (tokens, costs, durations)
+- ✅ Gateway health monitoring
+- ✅ Log forwarding
+- ✅ Simple setup (config only)
+
+### 2. Custom Hook-Based Plugin (This Repo)
+
+A plugin that hooks into the agent lifecycle for deeper tracing. Best for:
+
+- ✅ Connected distributed traces
+- ✅ Per-tool-call spans
+- ✅ Request lifecycle visibility
+- ✅ Debugging agent behavior
+
+**Recommendation:** Use both for complete observability.
 
 ## Quick Start
 
-Add this to your `~/.openclaw/openclaw.json`:
+### Official Plugin (5 minutes)
+
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -38,62 +54,70 @@ Then restart:
 openclaw gateway restart
 ```
 
-See the [Getting Started Guide](getting-started.md) for full setup instructions.
+### Custom Plugin (Additional)
+
+1. Clone the repo
+2. Add to `plugins.load.paths`
+3. Configure in `plugins.entries.otel-observability`
+4. Clear jiti cache and restart
+
+See [Getting Started](getting-started.md) for detailed instructions.
 
 ## What Gets Captured
 
-### Metrics
+### Official Plugin
 
-| Metric | Description |
-|--------|-------------|
-| `openclaw.tokens` | Token usage by type (input/output/cache_read/cache_write) |
-| `openclaw.cost.usd` | Estimated model cost in USD |
-| `openclaw.run.duration_ms` | Agent run duration histogram |
-| `openclaw.context.tokens` | Context window limit and usage |
-| `openclaw.webhook.received` | Webhook requests received |
-| `openclaw.webhook.error` | Webhook processing errors |
-| `openclaw.message.queued` | Messages queued for processing |
-| `openclaw.message.processed` | Messages processed by outcome |
-| `openclaw.queue.depth` | Queue depth on enqueue/dequeue |
-| `openclaw.session.state` | Session state transitions |
-| `openclaw.session.stuck` | Sessions stuck in processing |
+| Signal | Data |
+|--------|------|
+| **Metrics** | `openclaw.tokens`, `openclaw.cost.usd`, `openclaw.run.duration_ms`, `openclaw.webhook.*`, `openclaw.message.*`, `openclaw.queue.*`, `openclaw.session.*` |
+| **Traces** | Model usage, webhook processing, message processing, stuck sessions |
+| **Logs** | All Gateway logs with severity, subsystem, code location |
 
-### Traces
+### Custom Plugin (Additional)
 
-Spans are created for:
-- Model usage events (with token counts, cost, duration)
-- Webhook processing
-- Message processing
-- Stuck session detection
+| Signal | Data |
+|--------|------|
+| **Traces** | `openclaw.request` → `openclaw.agent.turn` → `tool.*` (connected hierarchy) |
+| **Metrics** | `openclaw.llm.tokens.*`, `openclaw.tool.calls`, `openclaw.session.resets` |
 
-### Logs
+## Trace Structure Comparison
 
-All OpenClaw logs forwarded with:
-- Severity level (DEBUG, INFO, WARN, ERROR)
-- Subsystem name (agent, gateway, channel, etc.)
-- Code location (file, line, function)
+**Official Plugin:**
+```
+openclaw.model.usage (standalone span)
+openclaw.webhook.processed (standalone span)
+openclaw.message.processed (standalone span)
+```
+
+**Custom Plugin:**
+```
+openclaw.request (root span - full lifecycle)
+├── openclaw.agent.turn (child)
+│   ├── tool.Read (child)
+│   ├── tool.exec (child)
+│   └── tool.Write (child)
+```
 
 ## Supported Backends
 
 Works with any OTLP-compatible backend:
 
-- **[Dynatrace](backends/dynatrace.md)** — Direct ingest via API
-- **[Grafana](backends/grafana.md)** — Tempo, Loki, Mimir stack
-- **Jaeger** — Distributed tracing
-- **Prometheus + Grafana** — Metrics visualization
-- **Honeycomb** — Observability platform
-- **New Relic** — APM and monitoring
-- **Any OTLP endpoint** — Local or cloud collectors
+- [Dynatrace](backends/dynatrace.md) — Direct OTLP ingest
+- [Grafana](backends/grafana.md) — Tempo, Loki, Mimir
+- Jaeger — Distributed tracing
+- Prometheus + Grafana — Metrics
+- Honeycomb, New Relic, Datadog — Cloud platforms
+- Local OTel Collector — Self-hosted
 
 ## Documentation
 
 - [Getting Started](getting-started.md) — Setup in 5 minutes
 - [Configuration](configuration.md) — All options explained
 - [Architecture](architecture.md) — How it works
-- [Telemetry Reference](telemetry/) — Detailed metric/trace docs
+- [Limitations](limitations.md) — Known constraints
+- [Telemetry Reference](telemetry/) — Metric/trace details
 
 ## Source
 
-This documentation covers OpenClaw's built-in diagnostics OTel support, available in OpenClaw v2026.2.0+.
-
-GitHub: [openclaw/openclaw](https://github.com/openclaw/openclaw)
+- Official plugin: Built into OpenClaw v2026.2.0+
+- Custom plugin: [github.com/henrikrexed/openclaw-observability-plugin](https://github.com/henrikrexed/openclaw-observability-plugin)

@@ -2,9 +2,22 @@
 
 OpenTelemetry observability for [OpenClaw](https://github.com/openclaw/openclaw) AI agents.
 
-## Quick Start
+## Two Approaches to Observability
 
-OpenClaw v2026.2+ includes **built-in OpenTelemetry support**. Add this to your `openclaw.json`:
+This repository documents **two complementary approaches** to monitoring OpenClaw:
+
+| Approach | Best For | Setup Complexity |
+|----------|----------|------------------|
+| **Official Plugin** | Operational metrics, Gateway health, cost tracking | Simple config |
+| **Custom Plugin** | Deep tracing, tool call visibility, request lifecycle | Plugin installation |
+
+**Recommendation:** Use both for complete observability.
+
+---
+
+## Approach 1: Official Diagnostics Plugin (Built-in)
+
+OpenClaw v2026.2+ includes **built-in OpenTelemetry support**. Just add to `openclaw.json`:
 
 ```json
 {
@@ -22,17 +35,15 @@ OpenClaw v2026.2+ includes **built-in OpenTelemetry support**. Add this to your 
 }
 ```
 
-Then restart the gateway:
+Then restart:
 
 ```bash
 openclaw gateway restart
 ```
 
-That's it! Traces, metrics, and logs will be sent to your OTLP endpoint.
+### What It Captures
 
-## Telemetry Captured
-
-### Metrics
+**Metrics:**
 - `openclaw.tokens` — Token usage by type (input/output/cache)
 - `openclaw.cost.usd` — Estimated model cost
 - `openclaw.run.duration_ms` — Agent run duration
@@ -42,31 +53,103 @@ That's it! Traces, metrics, and logs will be sent to your OTLP endpoint.
 - `openclaw.queue.*` — Queue depth and wait times
 - `openclaw.session.*` — Session state transitions
 
-### Traces
-Spans are created for:
-- Model usage (with token counts)
-- Webhook processing
-- Message processing
-- Stuck session detection
+**Traces:** Model usage, webhook processing, message processing, stuck sessions
 
-### Logs
-All OpenClaw logs are forwarded via OTLP with:
-- Log level and severity
-- Code location (file, line, function)
-- Logger name and subsystem
+**Logs:** All Gateway logs via OTLP with severity, subsystem, and code location
+
+---
+
+## Approach 2: Custom Hook-Based Plugin (This Repo)
+
+For **deeper observability**, install the custom plugin from this repo. It uses OpenClaw's typed plugin hooks to capture the full agent lifecycle.
+
+### What It Adds
+
+**Connected Traces:**
+```
+openclaw.request (root span)
+├── openclaw.agent.turn
+│   ├── tool.Read (file read)
+│   ├── tool.exec (shell command)  
+│   ├── tool.Write (file write)
+│   └── tool.web_search
+└── (child spans connected via trace context)
+```
+
+**Per-Tool Visibility:**
+- Individual spans for each tool call
+- Tool execution time
+- Result size (characters)
+- Error tracking per tool
+
+**Request Lifecycle:**
+- Full message → response tracing
+- Session context propagation
+- Agent turn duration with token breakdown
+
+### Installation
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/henrikrexed/openclaw-observability-plugin.git
+   ```
+
+2. Add to your `openclaw.json`:
+   ```json
+   {
+     "plugins": {
+       "load": {
+         "paths": ["/path/to/openclaw-observability-plugin"]
+       },
+       "entries": {
+         "otel-observability": {
+           "enabled": true,
+           "config": {
+             "endpoint": "http://localhost:4318",
+             "serviceName": "openclaw-gateway"
+           }
+         }
+       }
+     }
+   }
+   ```
+
+3. Clear cache and restart:
+   ```bash
+   rm -rf /tmp/jiti
+   systemctl --user restart openclaw-gateway
+   ```
+
+---
+
+## Comparing the Two Approaches
+
+| Feature | Official Plugin | Custom Plugin |
+|---------|-----------------|---------------|
+| Token metrics | ✅ Per model | ✅ Per session + model |
+| Cost tracking | ✅ Yes | ✅ Yes (from diagnostics) |
+| Gateway health | ✅ Webhooks, queues, sessions | ❌ Not focused |
+| Session state | ✅ State transitions | ❌ Not tracked |
+| **Tool call tracing** | ❌ No | ✅ Individual tool spans |
+| **Request lifecycle** | ❌ No | ✅ Full request → response |
+| **Connected traces** | ❌ Separate spans | ✅ Parent-child hierarchy |
+| Setup complexity | 🟢 Config only | 🟡 Plugin installation |
+
+---
 
 ## Backend Examples
 
-### Dynatrace
+### Dynatrace (Direct)
+
 ```json
 {
   "diagnostics": {
     "enabled": true,
     "otel": {
       "enabled": true,
-      "endpoint": "https://{your-environment-id}.live.dynatrace.com/api/v2/otlp",
+      "endpoint": "https://{env-id}.live.dynatrace.com/api/v2/otlp",
       "headers": {
-        "Authorization": "Api-Token {your-api-token}"
+        "Authorization": "Api-Token {your-token}"
       },
       "serviceName": "openclaw-gateway",
       "traces": true,
@@ -77,7 +160,8 @@ All OpenClaw logs are forwarded via OTLP with:
 }
 ```
 
-### Grafana Cloud / Tempo
+### Grafana Cloud
+
 ```json
 {
   "diagnostics": {
@@ -86,7 +170,7 @@ All OpenClaw logs are forwarded via OTLP with:
       "enabled": true,
       "endpoint": "https://otlp-gateway-{region}.grafana.net/otlp",
       "headers": {
-        "Authorization": "Basic {base64-encoded-credentials}"
+        "Authorization": "Basic {base64-credentials}"
       },
       "serviceName": "openclaw-gateway",
       "traces": true,
@@ -97,6 +181,7 @@ All OpenClaw logs are forwarded via OTLP with:
 ```
 
 ### Local OTel Collector
+
 ```json
 {
   "diagnostics": {
@@ -113,30 +198,56 @@ All OpenClaw logs are forwarded via OTLP with:
 }
 ```
 
-## Configuration Options
+---
+
+## Configuration Reference
+
+### Official Plugin Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `diagnostics.enabled` | boolean | false | Enable diagnostics system |
 | `diagnostics.otel.enabled` | boolean | false | Enable OTel export |
 | `diagnostics.otel.endpoint` | string | — | OTLP endpoint URL |
-| `diagnostics.otel.protocol` | string | "http/protobuf" | Protocol (http/protobuf or grpc) |
-| `diagnostics.otel.headers` | object | — | Custom headers (e.g., auth tokens) |
-| `diagnostics.otel.serviceName` | string | "openclaw" | OTel service name |
-| `diagnostics.otel.traces` | boolean | true | Enable trace export |
-| `diagnostics.otel.metrics` | boolean | true | Enable metrics export |
-| `diagnostics.otel.logs` | boolean | false | Enable log forwarding |
-| `diagnostics.otel.sampleRate` | number | 1.0 | Trace sampling rate (0.0-1.0) |
-| `diagnostics.otel.flushIntervalMs` | number | — | Export flush interval |
+| `diagnostics.otel.protocol` | string | "http/protobuf" | Protocol |
+| `diagnostics.otel.headers` | object | — | Custom headers |
+| `diagnostics.otel.serviceName` | string | "openclaw" | Service name |
+| `diagnostics.otel.traces` | boolean | true | Enable traces |
+| `diagnostics.otel.metrics` | boolean | true | Enable metrics |
+| `diagnostics.otel.logs` | boolean | false | Enable logs |
+| `diagnostics.otel.sampleRate` | number | 1.0 | Trace sampling (0-1) |
+
+### Custom Plugin Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `endpoint` | string | — | OTLP endpoint URL |
+| `serviceName` | string | "openclaw-gateway" | Service name |
+| `exporterType` | string | "otlp" | Exporter type |
+| `enableTraces` | boolean | true | Enable traces |
+| `enableMetrics` | boolean | true | Enable metrics |
+
+---
 
 ## Documentation
 
-Full documentation: [docs/](./docs/)
+- [Getting Started](./docs/getting-started.md) — Setup guide
+- [Configuration](./docs/configuration.md) — All options
+- [Architecture](./docs/architecture.md) — How it works
+- [Limitations](./docs/limitations.md) — Known constraints
+- [Backends](./docs/backends/) — Backend-specific guides
 
-- [Getting Started](./docs/getting-started.md)
-- [Configuration](./docs/configuration.md)
-- [Architecture](./docs/architecture.md)
-- [Backends](./docs/backends/)
+---
+
+## Known Limitations
+
+**Auto-instrumentation not possible:** OpenLLMetry/IITM breaks `@mariozechner/pi-ai` named exports due to ESM/CJS module isolation. All telemetry is captured via hooks, not direct SDK instrumentation.
+
+**No per-LLM-call spans:** Individual API calls to Claude/OpenAI cannot be traced. Token usage is aggregated per agent turn.
+
+See [Limitations](./docs/limitations.md) for details.
+
+---
 
 ## License
 

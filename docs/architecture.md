@@ -1,202 +1,319 @@
 # Architecture
 
-How OpenClaw's built-in OpenTelemetry diagnostics works.
+How OpenClaw observability works — both the official plugin and custom hook-based approach.
 
-## Overview
+## Overview: Two Approaches
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    OpenClaw Gateway                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │   Agent     │  │  Channels   │  │  Diagnostic Events  │ │
-│  │  Sessions   │  │  (WhatsApp, │  │   (model.usage,     │ │
-│  │             │  │   Telegram) │  │    message.*, etc)  │ │
-│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘ │
-│         │                │                     │            │
-│         └────────────────┼─────────────────────┘            │
-│                          │                                  │
-│                          ▼                                  │
-│               ┌─────────────────────┐                       │
-│               │  diagnostics-otel   │                       │
-│               │   (built-in plugin) │                       │
-│               └──────────┬──────────┘                       │
-│                          │                                  │
-│         ┌────────────────┼────────────────┐                 │
-│         ▼                ▼                ▼                 │
-│    ┌─────────┐     ┌──────────┐    ┌──────────┐            │
-│    │ Traces  │     │ Metrics  │    │   Logs   │            │
-│    │(spans)  │     │(counters,│    │(records) │            │
-│    │         │     │histograms│    │          │            │
-│    └────┬────┘     └────┬─────┘    └────┬─────┘            │
-│         └───────────────┼───────────────┘                   │
-│                         ▼                                   │
-│               ┌─────────────────────┐                       │
-│               │   OTLP Exporters    │                       │
-│               │  (HTTP or gRPC)     │                       │
-│               └──────────┬──────────┘                       │
-└──────────────────────────┼──────────────────────────────────┘
-                           │
-                           ▼
-                 ┌─────────────────────┐
-                 │   OTLP Endpoint     │
-                 │  (Collector or      │
-                 │   Direct Ingest)    │
-                 └──────────┬──────────┘
-                            │
-           ┌────────────────┼────────────────┐
-           ▼                ▼                ▼
-    ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-    │  Dynatrace  │  │   Grafana   │  │   Jaeger    │
-    │             │  │  (Tempo)    │  │             │
-    └─────────────┘  └─────────────┘  └─────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        OpenClaw Gateway                             │
+│                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                      Agent Execution                         │   │
+│  │  message_received → before_agent_start → tool_calls →       │   │
+│  │                     tool_result_persist → agent_end          │   │
+│  └──────────────────────────┬──────────────────────────────────┘   │
+│                              │                                      │
+│         ┌────────────────────┼────────────────────┐                │
+│         │                    │                    │                │
+│         ▼                    ▼                    ▼                │
+│  ┌─────────────┐    ┌───────────────┐    ┌─────────────────┐      │
+│  │  Diagnostic │    │  Typed Hooks  │    │   Log Output    │      │
+│  │   Events    │    │  (api.on())   │    │                 │      │
+│  │ (model.usage│    │               │    │                 │      │
+│  │  message.*) │    │               │    │                 │      │
+│  └──────┬──────┘    └───────┬───────┘    └────────┬────────┘      │
+│         │                   │                     │                │
+│         ▼                   ▼                     ▼                │
+│  ┌─────────────┐    ┌─────────────────┐   ┌──────────────┐        │
+│  │  OFFICIAL   │    │     CUSTOM      │   │ Log Forward  │        │
+│  │   PLUGIN    │    │     PLUGIN      │   │ (via official│        │
+│  │ diagnostics │    │ otel-observ...  │   │   plugin)    │        │
+│  │    -otel    │    │                 │   │              │        │
+│  └──────┬──────┘    └───────┬─────────┘   └──────┬───────┘        │
+│         │                   │                    │                 │
+│         └───────────────────┼────────────────────┘                 │
+│                             ▼                                      │
+│                   ┌─────────────────┐                              │
+│                   │ OTLP Exporters  │                              │
+│                   │ (HTTP/protobuf) │                              │
+│                   └────────┬────────┘                              │
+└────────────────────────────┼────────────────────────────────────────┘
+                             │
+                             ▼
+                   ┌─────────────────┐
+                   │  OTLP Endpoint  │
+                   │ (Collector or   │
+                   │  Direct Ingest) │
+                   └─────────────────┘
 ```
 
-## Components
+## Approach 1: Official Plugin (diagnostics-otel)
+
+### How It Works
+
+The official plugin uses the **diagnostic event bus** — a publish-subscribe system where the Gateway emits events and plugins consume them.
+
+```
+Gateway Core                    diagnostics-otel Plugin
+     │                                   │
+     │  emit("model.usage", {...})       │
+     │ ─────────────────────────────────>│
+     │                                   │  ──> create span
+     │                                   │  ──> update counters
+     │                                   │  ──> record histogram
+     │                                   │
+     │  emit("message.processed", {...}) │
+     │ ─────────────────────────────────>│
+     │                                   │  ──> create span
+     │                                   │  ──> update counters
+```
 
 ### Diagnostic Events
 
-OpenClaw's core emits diagnostic events for key operations:
+| Event | When Emitted | Data Included |
+|-------|--------------|---------------|
+| `model.usage` | After LLM call | tokens, cost, model, duration |
+| `webhook.received` | HTTP request arrives | channel, type |
+| `webhook.processed` | Handler completes | duration, chatId |
+| `webhook.error` | Handler fails | error message |
+| `message.queued` | Added to queue | channel, source, depth |
+| `message.processed` | Processing done | outcome, duration |
+| `queue.lane.enqueue` | Lane add | lane, size |
+| `queue.lane.dequeue` | Lane remove | lane, size, wait time |
+| `session.state` | State change | state, reason |
+| `session.stuck` | Stuck detected | age, queue depth |
 
-| Event Type | Description |
-|------------|-------------|
-| `model.usage` | Token usage after LLM calls |
-| `webhook.received` | Incoming webhook request |
-| `webhook.error` | Webhook processing failure |
-| `message.queued` | Message added to queue |
-| `message.processed` | Message handling complete |
-| `session.state` | Session state transitions |
-| `session.stuck` | Session stuck detection |
-| `queue.enqueue` | Item added to queue |
-| `queue.dequeue` | Item removed from queue |
+### OTel Signals Created
 
-### diagnostics-otel Plugin
-
-The built-in plugin (`@openclaw/diagnostics-otel`) subscribes to diagnostic events via `onDiagnosticEvent()` and converts them to OTel signals:
-
-**Metrics** (via `@opentelemetry/api`):
-- Counters for tokens, costs, message counts
-- Histograms for durations, queue depths
-
-**Traces**:
-- Spans for model usage, webhooks, messages
-- Includes token counts and duration as attributes
-
-**Logs** (via `registerLogTransport()`):
-- Intercepts OpenClaw's log output
-- Forwards as OTel LogRecords with attributes
-
-### OTel Exporters
-
-Uses official OpenTelemetry SDK packages:
-
-- `@opentelemetry/sdk-node` — Node.js SDK
-- `@opentelemetry/exporter-trace-otlp-http` — Trace export
-- `@opentelemetry/exporter-metrics-otlp-http` — Metrics export
-- `@opentelemetry/exporter-logs-otlp-http` — Log export
-
-## Data Flow
-
-### Token Usage Flow
-
+**Metrics:**
 ```
-1. Agent makes LLM call
-2. pi-ai returns response with usage stats
-3. Gateway emits "model.usage" diagnostic event
-4. diagnostics-otel receives event via onDiagnosticEvent()
-5. Creates:
-   - openclaw.tokens counter (input/output/cache)
-   - openclaw.cost.usd counter
-   - openclaw.run.duration_ms histogram
-   - Model usage span (if traces enabled)
-6. OTel SDK batches and exports via OTLP
+openclaw.tokens{type="input|output|cache_read|cache_write"}
+openclaw.cost.usd
+openclaw.run.duration_ms
+openclaw.context.tokens{type="limit|used"}
+openclaw.webhook.received
+openclaw.webhook.error
+openclaw.webhook.duration_ms
+openclaw.message.queued
+openclaw.message.processed
+openclaw.message.duration_ms
+openclaw.queue.depth
+openclaw.queue.wait_ms
+openclaw.session.state
+openclaw.session.stuck
+openclaw.session.stuck_age_ms
 ```
 
-### Log Flow
+**Traces:**
+- `openclaw.model.usage` — Per LLM call span
+- `openclaw.webhook.processed` — Per webhook span
+- `openclaw.webhook.error` — Error span (with status=ERROR)
+- `openclaw.message.processed` — Per message span
+- `openclaw.session.stuck` — Stuck detection span
+
+**Logs:**
+- All Gateway logs as OTel LogRecords
+- Includes severity, subsystem, code location
+
+---
+
+## Approach 2: Custom Hook-Based Plugin
+
+### How It Works
+
+The custom plugin uses **typed plugin hooks** — direct callbacks into the agent lifecycle.
 
 ```
-1. Any OpenClaw subsystem logs a message
-2. registerLogTransport() callback receives log object
-3. Parses log level, message, attributes
-4. Creates OTel LogRecord with:
-   - severity (DEBUG/INFO/WARN/ERROR)
-   - body (message text)
-   - attributes (subsystem, code location)
-5. LoggerProvider batches and exports via OTLP
+Gateway Agent Loop              Custom Plugin
+     │                               │
+     │  on("message_received")       │
+     │ ─────────────────────────────>│  ──> create ROOT span
+     │                               │      store in sessionContextMap
+     │                               │
+     │  on("before_agent_start")     │
+     │ ─────────────────────────────>│  ──> create AGENT TURN span
+     │                               │      (child of root)
+     │                               │
+     │  on("tool_result_persist")    │
+     │ ─────────────────────────────>│  ──> create TOOL span
+     │  (called for each tool)       │      (child of agent turn)
+     │                               │
+     │  on("agent_end")              │
+     │ ─────────────────────────────>│  ──> end agent turn span
+     │                               │      end root span
+     │                               │      extract tokens from messages
 ```
 
-## Configuration Processing
+### Trace Context Propagation
+
+The key difference is **trace context propagation**. The custom plugin maintains a session-to-context map:
+
+```typescript
+interface SessionTraceContext {
+  rootSpan: Span;           // openclaw.request
+  rootContext: Context;     // OTel context with root span
+  agentSpan?: Span;         // openclaw.agent.turn
+  agentContext?: Context;   // OTel context with agent span
+  startTime: number;
+}
+
+const sessionContextMap = new Map<string, SessionTraceContext>();
+```
+
+When creating child spans, it uses the stored context:
+
+```typescript
+// Tool span becomes child of agent turn
+const span = tracer.startSpan(
+  `tool.${toolName}`,
+  { kind: SpanKind.INTERNAL },
+  sessionCtx.agentContext  // <-- parent context
+);
+```
+
+### Resulting Trace Structure
 
 ```
-1. Gateway reads ~/.openclaw/openclaw.json
-2. Checks diagnostics.enabled && diagnostics.otel.enabled
-3. If false, plugin exits early (no instrumentation)
-4. If true:
-   - Creates OTel resource with serviceName
-   - Initializes SDK with exporters for enabled signals
-   - Subscribes to diagnostic events
-   - Registers log transport (if logs enabled)
+openclaw.request (root)
+│   openclaw.session.key: "main@whatsapp:+123..."
+│   openclaw.message.channel: "whatsapp"
+│   openclaw.request.duration_ms: 4523
+│
+└── openclaw.agent.turn (child)
+    │   gen_ai.usage.input_tokens: 1234
+    │   gen_ai.usage.output_tokens: 567
+    │   gen_ai.response.model: "claude-opus-4-5-..."
+    │   openclaw.agent.duration_ms: 4100
+    │
+    ├── tool.Read (child)
+    │       openclaw.tool.name: "Read"
+    │       openclaw.tool.result_chars: 2048
+    │
+    ├── tool.exec (child)
+    │       openclaw.tool.name: "exec"
+    │       openclaw.tool.result_chars: 156
+    │
+    └── tool.Write (child)
+            openclaw.tool.name: "Write"
+            openclaw.tool.result_chars: 0
 ```
 
-## Resource Attributes
+---
 
-All telemetry includes:
+## Data Flow Comparison
 
-| Attribute | Source |
-|-----------|--------|
-| `service.name` | `diagnostics.otel.serviceName` or "openclaw" |
-| `service.version` | OpenClaw version |
+### Official Plugin: Token Tracking
 
-Spans and metrics include:
+```
+1. Agent calls LLM via pi-ai
+2. pi-ai returns response with .usage
+3. Gateway calculates cost
+4. Gateway emits "model.usage" event with:
+   - usage: {input, output, cacheRead, cacheWrite}
+   - costUsd: 0.0234
+   - model: "claude-..."
+   - durationMs: 2341
+5. diagnostics-otel receives event
+6. Creates metrics + span
+7. Batches and exports via OTLP
+```
+
+### Custom Plugin: Token Tracking
+
+```
+1. Agent calls LLM via pi-ai
+2. pi-ai returns response with .usage
+3. Gateway fires agent_end hook with:
+   - messages: [...including assistant messages with .usage]
+4. Custom plugin:
+   - Parses messages for usage data
+   - Checks for pending diagnostic data (if available)
+   - Adds attributes to existing agent turn span
+   - Updates counters
+5. Ends spans (agent turn, then root)
+6. Batches and exports via OTLP
+```
+
+---
+
+## Resource and Attributes
+
+### Common Attributes
 
 | Attribute | Description |
 |-----------|-------------|
-| `openclaw.channel` | Channel name (whatsapp, telegram, etc.) |
-| `openclaw.provider` | LLM provider (anthropic, openai, etc.) |
+| `service.name` | Service name from config |
+| `openclaw.channel` | Channel (whatsapp, telegram, etc.) |
+| `openclaw.session.key` | Session identifier |
+
+### Official Plugin Specific
+
+| Attribute | Description |
+|-----------|-------------|
+| `openclaw.provider` | LLM provider |
 | `openclaw.model` | Model name |
-| `openclaw.sessionId` | Session UUID |
-| `openclaw.sessionKey` | Session key |
+| `openclaw.token` | Token type (input/output/cache_*) |
+| `openclaw.webhook` | Webhook update type |
+| `openclaw.outcome` | Message outcome |
+| `openclaw.state` | Session state |
+
+### Custom Plugin Specific
+
+| Attribute | Description |
+|-----------|-------------|
+| `openclaw.agent.id` | Agent identifier |
+| `openclaw.tool.name` | Tool name |
+| `openclaw.tool.call_id` | Tool call UUID |
+| `openclaw.tool.result_chars` | Result size |
+| `gen_ai.usage.input_tokens` | Input token count |
+| `gen_ai.usage.output_tokens` | Output token count |
+| `gen_ai.response.model` | Model used |
+
+---
 
 ## Performance Considerations
 
 ### Batching
 
-All signals are batched before export:
-- Traces: BatchSpanProcessor
-- Metrics: PeriodicExportingMetricReader
-- Logs: BatchLogRecordProcessor
+Both plugins use batched export:
+- **Traces:** BatchSpanProcessor (default 5s or 512 spans)
+- **Metrics:** PeriodicExportingMetricReader (default 60s)
+- **Logs:** BatchLogRecordProcessor (default 5s)
+
+### Overhead
+
+| Plugin | Overhead Source |
+|--------|-----------------|
+| Official | Event subscription, metric/span creation |
+| Custom | Hook interception, context map management |
+
+Both are lightweight — the OTel SDK handles batching efficiently.
 
 ### Sampling
 
-Configure `sampleRate` (0.0–1.0) to reduce trace volume in high-traffic deployments.
-
-### Selective Export
-
-Disable unused signals to reduce overhead:
+Reduce trace volume with `sampleRate`:
 
 ```json
 {
   "diagnostics": {
-    "enabled": true,
     "otel": {
-      "enabled": true,
-      "traces": true,
-      "metrics": true,
-      "logs": false
+      "sampleRate": 0.1  // 10% of traces
     }
   }
 }
 ```
 
-## Comparison with Custom Plugins
+---
 
-The built-in `diagnostics-otel` differs from custom hook-based plugins:
+## When to Use Each
 
-| Aspect | Built-in (diagnostics-otel) | Custom (hooks-based) |
-|--------|----------------------------|----------------------|
-| API | `onDiagnosticEvent()` | `api.on()` hooks |
-| Trace granularity | Per-event spans | Connected parent-child traces |
-| Setup | Config only | Plugin installation |
-| Token tracking | Via diagnostic events | Via agent_end hook parsing |
-| Maintenance | OpenClaw team | User maintained |
-
-For most use cases, the built-in plugin is sufficient. Custom plugins offer more control over trace structure if needed.
+| Use Case | Recommended |
+|----------|-------------|
+| Production monitoring | Official |
+| Cost/token dashboards | Official |
+| Gateway health alerts | Official |
+| Debugging specific requests | Custom |
+| Understanding agent behavior | Custom |
+| Tool execution analysis | Custom |
+| Complete observability | Both |
