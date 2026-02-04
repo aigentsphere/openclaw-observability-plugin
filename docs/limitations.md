@@ -1,5 +1,23 @@
 # Limitations
 
+## Official diagnostics-otel Plugin Dependency Issue
+
+When OpenClaw is installed via **npm** (not pnpm from source), the bundled `@openclaw/diagnostics-otel` plugin may fail to load with:
+
+```
+Error: Cannot find module '@opentelemetry/api'
+```
+
+**Why:** The official plugin uses `workspace:*` dependency protocol (pnpm monorepo feature) that doesn't resolve when installed via npm.
+
+**Workaround:** Use this custom plugin instead, which has its own properly installed OTel dependencies.
+
+**Note:** Don't run both plugins simultaneously — they both initialize the OTel SDK which can cause conflicts.
+
+---
+
+## Auto-Instrumentation Limitations
+
 ## No Per-LLM-Call Auto-Instrumentation
 
 The plugin cannot produce individual spans for each LLM API call (e.g., `anthropic.chat` or `openai.chat.completions.create`). Instead, token usage and model info are captured per **agent turn** — aggregated across all LLM calls within a single turn.
