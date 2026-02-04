@@ -2,9 +2,11 @@
  * OpenClaw OTel Observability Plugin
  *
  * Provides full OpenTelemetry observability for OpenClaw:
- *   - LLM call traces via OpenLLMetry (auto-instruments Anthropic/OpenAI)
- *   - Custom spans for tool executions, commands, gateway lifecycle
- *   - Metrics: token usage, latency histograms, tool call counts, active sessions
+ *   - Connected distributed traces (request → agent turn → tools)
+ *   - Cost tracking via OpenClaw diagnostic events integration
+ *   - Token usage (input, output, cache read/write) as spans + metrics
+ *   - Tool execution spans with result metadata
+ *   - Metrics: token usage, cost, latency histograms, tool calls
  *   - OTLP export to any OpenTelemetry-compatible backend (Dynatrace, Grafana, etc.)
  *
  * Usage in openclaw config:
@@ -31,12 +33,13 @@ import { parseConfig, type OtelObservabilityConfig } from "./src/config.js";
 import { initTelemetry, type TelemetryRuntime } from "./src/telemetry.js";
 import { initOpenLLMetry } from "./src/openllmetry.js";
 import { registerHooks } from "./src/hooks.js";
+import { registerDiagnosticsListener, hasDiagnosticsSupport } from "./src/diagnostics.js";
 
 const otelObservabilityPlugin = {
   id: "otel-observability",
   name: "OpenTelemetry Observability",
   description:
-    "Traces, metrics, and logs for OpenClaw using OpenLLMetry and OpenTelemetry",
+    "Connected traces, cost tracking, and metrics for OpenClaw via OpenTelemetry",
 
   configSchema: {
     parse(value: unknown): OtelObservabilityConfig {
@@ -49,6 +52,7 @@ const otelObservabilityPlugin = {
     const logger = api.logger;
 
     let telemetry: TelemetryRuntime | null = null;
+    let unsubscribeDiagnostics: (() => void) | null = null;
 
     // ── RPC: status endpoint ────────────────────────────────────────
 
@@ -88,6 +92,8 @@ const otelObservabilityPlugin = {
             console.log(`  Logs:            ${config.logs ? "✅" : "❌"}`);
             console.log(`  Capture content: ${config.captureContent ? "✅" : "❌"}`);
             console.log(`  Initialized:     ${telemetry ? "✅" : "❌"}`);
+            console.log(`  Cost tracking:   ${hasDiagnosticsSupport() ? "✅ (via diagnostics API)" : "❌"}`);
+
           });
       },
       { commands: ["otel"] }
@@ -115,6 +121,13 @@ const otelObservabilityPlugin = {
         // 3. Register hooks for tool results and command events
         registerHooks(api, telemetry, config);
 
+        // 4. Subscribe to OpenClaw diagnostic events (model.usage, etc.)
+        //    This gives us cost data and accurate token counts
+        unsubscribeDiagnostics = await registerDiagnosticsListener(telemetry, logger);
+        if (hasDiagnosticsSupport()) {
+          logger.info("[otel] ✅ Integrated with OpenClaw diagnostics (cost tracking enabled)");
+        }
+
         logger.info("[otel] ✅ Observability pipeline active");
         logger.info(
           `[otel]   Traces=${config.traces} Metrics=${config.metrics} Logs=${config.logs}`
@@ -123,6 +136,10 @@ const otelObservabilityPlugin = {
       },
 
       stop: async () => {
+        if (unsubscribeDiagnostics) {
+          unsubscribeDiagnostics();
+          unsubscribeDiagnostics = null;
+        }
         if (telemetry) {
           await telemetry.shutdown();
           telemetry = null;

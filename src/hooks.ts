@@ -25,6 +25,7 @@
 import { SpanKind, SpanStatusCode, context, trace, type Span, type Context } from "@opentelemetry/api";
 import type { TelemetryRuntime } from "./telemetry.js";
 import type { OtelObservabilityConfig } from "./config.js";
+import { activeAgentSpans, getPendingUsage, enrichSpanWithUsage, hasDiagnosticsSupport } from "./diagnostics.js";
 
 /** Active trace context for a session — allows connecting spans into one trace. */
 interface SessionTraceContext {
@@ -145,6 +146,9 @@ export function registerHooks(
           });
         }
 
+        // Register in activeAgentSpans for diagnostics integration
+        activeAgentSpans.set(sessionKey, agentSpan);
+
         logger.debug?.(`[otel] Agent turn span started: agent=${agentId}, session=${sessionKey}`);
       } catch {
         // Silently ignore
@@ -251,37 +255,52 @@ export function registerHooks(
         const success = event?.success !== false;
         const errorMsg = event?.error;
 
-        // Extract token usage from the messages array
-        // Each assistant message has .usage with inputTokens/outputTokens
+        // Try to get usage from diagnostic events (includes cost!)
+        const diagUsage = getPendingUsage(sessionKey);
+
+        // Fallback: Extract token usage from the messages array
         const messages: any[] = event?.messages || [];
         let totalInputTokens = 0;
         let totalOutputTokens = 0;
+        let cacheReadTokens = 0;
+        let cacheWriteTokens = 0;
         let model = "unknown";
+        let costUsd: number | undefined;
 
-        for (const msg of messages) {
-          if (msg?.role === "assistant" && msg?.usage) {
-            const u = msg.usage;
-            // pi-ai stores usage as .input/.output (normalized names)
-            if (typeof u.input === "number") totalInputTokens += u.input;
-            // Also check alternative field names used by other providers
-            else if (typeof u.inputTokens === "number") totalInputTokens += u.inputTokens;
-            else if (typeof u.input_tokens === "number") totalInputTokens += u.input_tokens;
+        if (diagUsage) {
+          // Use diagnostic event data (more accurate, includes cost)
+          totalInputTokens = diagUsage.usage.input || 0;
+          totalOutputTokens = diagUsage.usage.output || 0;
+          cacheReadTokens = diagUsage.usage.cacheRead || 0;
+          cacheWriteTokens = diagUsage.usage.cacheWrite || 0;
+          model = diagUsage.model || "unknown";
+          costUsd = diagUsage.costUsd;
+          logger.debug?.(`[otel] agent_end using diagnostic data: cost=$${costUsd?.toFixed(4) || "?"}`);
+        } else {
+          // Fallback: parse messages manually
+          for (const msg of messages) {
+            if (msg?.role === "assistant" && msg?.usage) {
+              const u = msg.usage;
+              // pi-ai stores usage as .input/.output (normalized names)
+              if (typeof u.input === "number") totalInputTokens += u.input;
+              else if (typeof u.inputTokens === "number") totalInputTokens += u.inputTokens;
+              else if (typeof u.input_tokens === "number") totalInputTokens += u.input_tokens;
 
-            if (typeof u.output === "number") totalOutputTokens += u.output;
-            else if (typeof u.outputTokens === "number") totalOutputTokens += u.outputTokens;
-            else if (typeof u.output_tokens === "number") totalOutputTokens += u.output_tokens;
+              if (typeof u.output === "number") totalOutputTokens += u.output;
+              else if (typeof u.outputTokens === "number") totalOutputTokens += u.outputTokens;
+              else if (typeof u.output_tokens === "number") totalOutputTokens += u.output_tokens;
 
-            // Also capture cache tokens if available
-            if (typeof u.cacheRead === "number") totalInputTokens += u.cacheRead;
-            if (typeof u.cacheWrite === "number") totalInputTokens += u.cacheWrite;
-          }
-          // Grab model from the last assistant message
-          if (msg?.role === "assistant" && msg?.model) {
-            model = msg.model;
+              if (typeof u.cacheRead === "number") cacheReadTokens += u.cacheRead;
+              if (typeof u.cacheWrite === "number") cacheWriteTokens += u.cacheWrite;
+            }
+            if (msg?.role === "assistant" && msg?.model) {
+              model = msg.model;
+            }
           }
         }
 
-        logger.debug?.(`[otel] agent_end tokens: input=${totalInputTokens}, output=${totalOutputTokens}, model=${model}, assistantMsgs=${messages.filter((m:any) => m?.role === "assistant").length}`);
+        const totalTokens = totalInputTokens + totalOutputTokens + cacheReadTokens + cacheWriteTokens;
+        logger.debug?.(`[otel] agent_end tokens: input=${totalInputTokens}, output=${totalOutputTokens}, cache_read=${cacheReadTokens}, cache_write=${cacheWriteTokens}, model=${model}`);
 
         const sessionCtx = sessionContextMap.get(sessionKey);
 
@@ -291,28 +310,46 @@ export function registerHooks(
 
           if (typeof durationMs === "number") {
             agentSpan.setAttribute("openclaw.agent.duration_ms", durationMs);
-            histograms.toolDuration.record(durationMs, {
-              "agent.id": agentId,
-              "event.type": "agent_turn",
-            });
           }
 
-          // Token usage from messages — both as span attributes AND metrics
+          // Token usage — GenAI semantic convention attributes
           agentSpan.setAttribute("gen_ai.usage.input_tokens", totalInputTokens);
           agentSpan.setAttribute("gen_ai.usage.output_tokens", totalOutputTokens);
-          agentSpan.setAttribute("gen_ai.usage.total_tokens", totalInputTokens + totalOutputTokens);
+          agentSpan.setAttribute("gen_ai.usage.total_tokens", totalTokens);
           agentSpan.setAttribute("gen_ai.response.model", model);
           agentSpan.setAttribute("openclaw.agent.success", success);
 
-          // Record token consumption metrics (cumulative counters)
-          if (totalInputTokens > 0 || totalOutputTokens > 0) {
+          // Cache tokens (custom attributes)
+          if (cacheReadTokens > 0) {
+            agentSpan.setAttribute("gen_ai.usage.cache_read_tokens", cacheReadTokens);
+          }
+          if (cacheWriteTokens > 0) {
+            agentSpan.setAttribute("gen_ai.usage.cache_write_tokens", cacheWriteTokens);
+          }
+
+          // Cost (from diagnostic events) — this is the key addition!
+          if (typeof costUsd === "number") {
+            agentSpan.setAttribute("openclaw.llm.cost_usd", costUsd);
+          }
+
+          // Context window (from diagnostic events)
+          if (diagUsage?.context?.limit) {
+            agentSpan.setAttribute("openclaw.context.limit", diagUsage.context.limit);
+          }
+          if (diagUsage?.context?.used) {
+            agentSpan.setAttribute("openclaw.context.used", diagUsage.context.used);
+          }
+
+          // Record metrics only if we didn't get them from diagnostics
+          // (diagnostics module already records metrics on model.usage event)
+          if (!diagUsage && (totalInputTokens > 0 || totalOutputTokens > 0)) {
             const metricAttrs = {
               "gen_ai.response.model": model,
               "openclaw.agent.id": agentId,
             };
-            counters.tokensPrompt.add(totalInputTokens, metricAttrs);
+            counters.tokensPrompt.add(totalInputTokens + cacheReadTokens + cacheWriteTokens, metricAttrs);
             counters.tokensCompletion.add(totalOutputTokens, metricAttrs);
-            counters.tokensTotal.add(totalInputTokens + totalOutputTokens, metricAttrs);
+            counters.tokensTotal.add(totalTokens, metricAttrs);
             counters.llmRequests.add(1, metricAttrs);
           }
 
@@ -344,6 +381,7 @@ export function registerHooks(
 
         // Clean up
         sessionContextMap.delete(sessionKey);
+        activeAgentSpans.delete(sessionKey);
 
         logger.debug?.(`[otel] Trace completed for session=${sessionKey}`);
       } catch {
