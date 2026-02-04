@@ -91,22 +91,42 @@ total:        998,598 tokens
 
 ## Cost Calculation
 
-Using Claude Opus pricing (example rates):
+### Current Anthropic API Pricing (2026)
+
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|-------|--------|------------|-------------|
+| **Opus 4.5** | $5/MTok | $25/MTok | $0.50/MTok | $6.25/MTok |
+| **Sonnet 4.5** | $3/MTok | $15/MTok | $0.30/MTok | $3.75/MTok |
+| **Haiku 4.5** | $1/MTok | $5/MTok | $0.10/MTok | $1.25/MTok |
+
+*(MTok = Million Tokens)*
+
+### Example Cost Breakdown (Opus 4.5)
 
 | Token Type | Count | Rate (per 1M) | Cost |
 |------------|-------|---------------|------|
-| Cache read | 918,174 | $1.50 | $1.38 |
-| Cache write | 62,437 | $18.75 | $1.17 |
-| Input | 156 | $15.00 | $0.002 |
-| Output | 17,831 | $75.00 | $1.34 |
-| **Total** | | | **$3.89** |
+| Cache read | 918,174 | $0.50 | $0.46 |
+| Cache write | 62,437 | $6.25 | $0.39 |
+| Input | 156 | $5.00 | $0.001 |
+| Output | 17,831 | $25.00 | $0.45 |
+| **Total** | | | **~$1.30** |
 
 Without caching, the same request would cost:
-- All input at standard rate: (918,174 + 62,437 + 156) × $15/1M = $14.71
-- Output: $1.34
-- **Total without cache: $16.05**
+- All input at standard rate: (918,174 + 62,437 + 156) × $5/1M = $4.90
+- Output: $0.45
+- **Total without cache: $5.35**
 
 **Savings from caching: ~76%**
+
+### Important: Subscriptions vs API
+
+| Claude Subscription | API (OpenClaw uses this) |
+|---------------------|-------------------------|
+| Free: $0 | Pay per token |
+| Pro: $20/month | No monthly fee |
+| Max: $100-200/month | Billed to API account |
+
+**Your Claude Pro/Max subscription does NOT cover OpenClaw usage!** OpenClaw uses the API, which is billed separately.
 
 ## Why Total Doesn't Equal Sum
 
