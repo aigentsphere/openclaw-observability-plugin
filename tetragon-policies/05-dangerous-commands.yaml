@@ -1,0 +1,31 @@
+# Detect dangerous commands (rate limited)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openclaw-dangerous-commands
+spec:
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+      selectors:
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/bin/node"
+                - "/usr/local/bin/node"
+          matchArgs:
+            - index: 0
+              operator: "Postfix"
+              values:
+                - "/rm"
+                - "/dd"
+                - "/nc"
+                - "/netcat"
+                - "/ncat"
+                - "/curl"
+                - "/wget"
+          matchActions:
+            - action: Post

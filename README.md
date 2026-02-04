@@ -239,6 +239,47 @@ openclaw.request (root span)
 
 ---
 
+## Optional: Kernel-Level Security with Tetragon
+
+For **defense in depth**, add [Tetragon](https://tetragon.io) eBPF-based monitoring. While the plugins above capture application-level telemetry, Tetragon sees what happens at the kernel level — file access, process execution, network connections, and privilege changes.
+
+### Why Tetragon?
+
+- **Tamper-proof**: Even a compromised agent can't hide its kernel-level actions
+- **Sensitive file detection**: Alert when `.env`, SSH keys, or credentials are accessed
+- **Dangerous command detection**: Catch `rm`, `curl | sh`, `chmod 777`, etc.
+- **Privilege escalation**: Detect `setuid`/`setgid` attempts
+
+### Quick Setup
+
+```bash
+# Install Tetragon
+curl -LO https://github.com/cilium/tetragon/releases/latest/download/tetragon-v1.6.0-amd64.tar.gz
+tar -xzf tetragon-v1.6.0-amd64.tar.gz && cd tetragon-v1.6.0-amd64
+sudo ./install.sh
+
+# Create OpenClaw policies directory
+sudo mkdir -p /etc/tetragon/tetragon.tp.d/openclaw
+
+# Add policies (see docs/security/tetragon.md for full examples)
+# Start Tetragon
+sudo systemctl enable --now tetragon
+```
+
+Tetragon events are exported to `/var/log/tetragon/tetragon.log` and can be ingested by the OTel Collector using the `filelog` receiver.
+
+### Complete Observability Stack
+
+| Layer | Source | What It Shows |
+|-------|--------|---------------|
+| **Application** | Custom Plugin | Tool calls, tokens, request flow |
+| **Gateway** | Official Plugin | Session health, queues, costs |
+| **Kernel** | Tetragon | System calls, file access, network |
+
+See [Security: Tetragon](./docs/security/tetragon.md) for full installation and configuration guide.
+
+---
+
 ## Known Limitations
 
 **Auto-instrumentation not possible:** OpenLLMetry/IITM breaks `@mariozechner/pi-ai` named exports due to ESM/CJS module isolation. All telemetry is captured via hooks, not direct SDK instrumentation.

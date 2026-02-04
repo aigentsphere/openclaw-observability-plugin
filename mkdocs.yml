@@ -75,6 +75,8 @@ nav:
     - OTel Collector: backends/otel-collector.md
     - Grafana: backends/grafana.md
     - Generic OTLP: backends/generic-otlp.md
+  - Security:
+    - Kernel Monitoring with Tetragon: security/tetragon.md
   - Architecture: architecture.md
   - Limitations: limitations.md
   - Development: development.md

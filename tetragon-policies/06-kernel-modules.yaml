@@ -1,0 +1,27 @@
+# Block kernel module operations (critical)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: openclaw-kernel-modules
+spec:
+  kprobes:
+    - call: "sys_init_module"
+      syscall: true
+      selectors:
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/bin/node"
+                - "/usr/local/bin/node"
+          matchActions:
+            - action: Sigkill
+    - call: "sys_finit_module"
+      syscall: true
+      selectors:
+        - matchBinaries:
+            - operator: "In"
+              values:
+                - "/usr/bin/node"
+                - "/usr/local/bin/node"
+          matchActions:
+            - action: Sigkill
