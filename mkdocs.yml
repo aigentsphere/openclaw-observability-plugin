@@ -76,6 +76,7 @@ nav:
     - Grafana: backends/grafana.md
     - Generic OTLP: backends/generic-otlp.md
   - Security:
+    - Real-Time Detection: security/detection.md
     - Kernel Monitoring with Tetragon: security/tetragon.md
   - Architecture: architecture.md
   - Limitations: limitations.md

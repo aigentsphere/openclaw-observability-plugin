@@ -176,6 +176,60 @@ Counts messages received from users across all channels.
 
 Counts messages sent by the agent across all channels.
 
+## Security Metrics
+
+### `openclaw.security.events`
+
+| | |
+|---|---|
+| **Type** | Counter |
+| **Unit** | events |
+| **Attributes** | `detection`, `severity` |
+| **Description** | Total security events detected across all detection types |
+
+The umbrella counter for all security detections. Use `detection` to filter by type (`sensitive_file_access`, `prompt_injection`, `dangerous_command`) and `severity` to filter by level (`critical`, `high`, `warning`).
+
+---
+
+### `openclaw.security.sensitive_file_access`
+
+| | |
+|---|---|
+| **Type** | Counter |
+| **Unit** | events |
+| **Attributes** | `file_pattern` |
+| **Description** | Attempts to access sensitive files (credentials, SSH keys, .env, etc.) |
+
+Triggers when the agent reads, writes, or edits files matching sensitive patterns (`.env`, `.ssh/`, `credentials`, `api_key`, etc.). The `file_pattern` attribute contains the regex source that matched.
+
+---
+
+### `openclaw.security.prompt_injection`
+
+| | |
+|---|---|
+| **Type** | Counter |
+| **Unit** | events |
+| **Attributes** | `pattern_count` |
+| **Description** | Prompt injection attempts detected in inbound messages |
+
+Detects social engineering patterns like "ignore previous instructions", fake `[SYSTEM]` tags, role manipulation ("pretend you are"), and jailbreak attempts. The `pattern_count` attribute shows how many patterns matched (more = higher confidence).
+
+---
+
+### `openclaw.security.dangerous_command`
+
+| | |
+|---|---|
+| **Type** | Counter |
+| **Unit** | events |
+| **Attributes** | `command_type` |
+| **Description** | Dangerous shell command executions detected |
+
+Catches data exfiltration (`curl -d`, `nc -e`), destructive commands (`rm -rf /`, `mkfs`), privilege escalation (`chmod +s`), crypto mining (`xmrig`), and persistence mechanisms (`crontab`, `.bashrc` modification). The `command_type` attribute describes the matched threat.
+
+---
+
 ## Dashboard Examples
 
 ### Token Usage Over Time
@@ -202,4 +256,28 @@ timeseries sum(openclaw.tool.errors) / sum(openclaw.tool.calls) * 100, by:{tool.
 
 ```
 timeseries sum(openclaw.tool.calls), by:{tool.name}
+```
+
+### Security Events Over Time
+
+```
+timeseries sum(openclaw.security.events), by:{detection, severity}
+```
+
+### Sensitive File Access by Pattern
+
+```
+timeseries sum(openclaw.security.sensitive_file_access), by:{file_pattern}
+```
+
+### Dangerous Commands by Type
+
+```
+timeseries sum(openclaw.security.dangerous_command), by:{command_type}
+```
+
+### Prompt Injection Attempts
+
+```
+timeseries sum(openclaw.security.prompt_injection), by:{pattern_count}
 ```

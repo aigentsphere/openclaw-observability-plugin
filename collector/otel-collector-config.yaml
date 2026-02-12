@@ -108,9 +108,6 @@ processors:
   # Cumulative to Delta - Dynatrace requires delta temporality for counters
   # ─────────────────────────────────────────────────────────────────────────────
   cumulativetodelta:
-    include:
-      match_type: ""
-    max_stale: 300s
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Batching - improves export efficiency
@@ -170,6 +167,11 @@ processors:
   # ─────────────────────────────────────────────────────────────────────────────
   # Resource attributes for Tetragon security events
   # ─────────────────────────────────────────────────────────────────────────────
+  filter:
+        error_mode: ignore
+        metrics:
+          metric:
+            - 'type == METRIC_DATA_TYPE_SUMMARY'
   resource/tetragon:
     attributes:
       - key: service.name
@@ -212,7 +214,7 @@ service:
     # ── OpenClaw + Host Metrics ──
     metrics:
       receivers: [otlp, hostmetrics]
-      processors: [resourcedetection/system, resource/openclaw, cumulativetodelta, batch]
+      processors: [resourcedetection/system, resource/openclaw,filter, cumulativetodelta, batch]
       exporters: [otlphttp/dynatrace, debug]
 
     # ── OpenClaw Application Logs (OTLP + filelog) ──
