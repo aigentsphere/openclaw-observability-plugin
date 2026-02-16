@@ -1,10 +1,17 @@
 {
-  "name": "@openclaw/otel-observability",
-  "version": "0.1.0",
+  "name": "@aigentsphere/openclaw-otel-observability",
+  "version": "0.2.0",
   "description": "OpenTelemetry observability plugin for OpenClaw — traces, metrics, and logs for your AI agent using OpenLLMetry",
   "type": "module",
   "openclaw": {
     "extensions": ["./index.ts"]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aigentsphere/openclaw-observability-plugin.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

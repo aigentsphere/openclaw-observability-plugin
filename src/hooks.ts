@@ -4,6 +4,7 @@
  *
  * Trace structure per request:
  *   openclaw.request (root span, covers full message → reply lifecycle)
+ *   ├── openclaw.message.received (optional, channel adapter path only)
  *   ├── openclaw.agent.turn (agent processing span)
  *   │   ├── tool.exec (tool call)
  *   │   ├── tool.Read (tool call)
@@ -12,20 +13,33 @@
  *   └── (future: message.sent span)
  *
  * Context propagation:
- *   - message_received: creates root span, stores in sessionContextMap
- *   - before_agent_start: creates child "agent turn" span under root
+ *   - before_agent_start: creates ROOT span + child "agent turn" span (universal)
+ *   - message_received: creates standalone span for channel audit trail (optional)
  *   - tool_result_persist: creates child tool span under agent turn
- *   - agent_end: ends the agent turn span
+ *   - agent_end: ends the agent turn + root spans
  *
  * IMPORTANT: OpenClaw has TWO hook registration systems:
  *   - api.registerHook() → event-stream hooks (command:new, gateway:startup)
  *   - api.on()           → typed plugin hooks (tool_result_persist, agent_end)
+ *
+ * IMPORTANT: The message_received hook only fires for channel adapter paths
+ * (Slack, Telegram, etc. via dispatch-from-config.ts). The Gateway UI uses a
+ * WebSocket RPC path that bypasses dispatch-from-config.ts entirely, so
+ * message_received NEVER fires for Gateway UI interactions.
+ *
+ * before_agent_start fires on the SHARED agent runtime path for ALL channels,
+ * making it the only reliable hook for creating root spans.
+ *
+ * Additionally, message_received and before_agent_start receive DIFFERENT
+ * session key formats (channel-specific vs agent-runtime), so spans created
+ * in message_received cannot be reliably looked up by before_agent_start.
+ * See: https://github.com/henrikrexed/openclaw-observability-plugin/issues/2
  */
 
 import { SpanKind, SpanStatusCode, context, trace, type Span, type Context } from "@opentelemetry/api";
 import type { TelemetryRuntime } from "./telemetry.js";
 import type { OtelObservabilityConfig } from "./config.js";
-import { activeAgentSpans, getPendingUsage, enrichSpanWithUsage, hasDiagnosticsSupport } from "./diagnostics.js";
+import { activeAgentSpans, getPendingUsage } from "./diagnostics.js";
 import { checkToolSecurity, checkMessageSecurity, type SecurityCounters } from "./security.js";
 
 /** Active trace context for a session — allows connecting spans into one trace. */
@@ -46,7 +60,7 @@ const sessionContextMap = new Map<string, SessionTraceContext>();
 export function registerHooks(
   api: any,
   telemetry: TelemetryRuntime,
-  config: OtelObservabilityConfig
+  _config: OtelObservabilityConfig
 ): void {
   const { tracer, counters, histograms } = telemetry;
   const logger = api.logger;
@@ -56,8 +70,18 @@ export function registerHooks(
   // ═══════════════════════════════════════════════════════════════════
 
   // ── message_received ─────────────────────────────────────────────
-  // Creates the ROOT span for the entire request lifecycle.
-  // All subsequent spans (agent, tools) become children of this span.
+  // ENRICHMENT ONLY — does NOT create root spans.
+  //
+  // This hook only fires for channel adapter paths (Slack, Telegram, etc.)
+  // via dispatch-from-config.ts. It does NOT fire for Gateway UI (WebSocket
+  // RPC path). Additionally, it receives a channel-specific session key
+  // that differs from the agent-runtime session key used by before_agent_start.
+  //
+  // Therefore, this hook:
+  //   1. Creates a short-lived standalone span for channel audit trail
+  //   2. Runs prompt injection security detection
+  //   3. Records the messagesReceived metric with channel info
+  //   4. Does NOT store context in sessionContextMap (avoids orphaned spans)
 
   // Build security counters object for detection module
   const securityCounters: SecurityCounters = {
@@ -76,8 +100,10 @@ export function registerHooks(
         const from = event?.from || event?.senderId || "unknown";
         const messageText = event?.text || event?.message || "";
 
-        // Create root span for this request
-        const rootSpan = tracer.startSpan("openclaw.request", {
+        // Create a standalone audit span (not a root span for child hooks).
+        // This captures channel metadata for observability without creating
+        // orphaned root spans that never get closed.
+        const messageSpan = tracer.startSpan("openclaw.message.received", {
           kind: SpanKind.SERVER,
           attributes: {
             "openclaw.message.channel": channel,
@@ -91,7 +117,7 @@ export function registerHooks(
         if (messageText && typeof messageText === "string" && messageText.length > 0) {
           const securityEvent = checkMessageSecurity(
             messageText,
-            rootSpan,
+            messageSpan,
             securityCounters,
             sessionKey
           );
@@ -100,32 +126,33 @@ export function registerHooks(
           }
         }
 
-        // Store the context so child spans can reference it
-        const rootContext = trace.setSpan(context.active(), rootSpan);
-
-        sessionContextMap.set(sessionKey, {
-          rootSpan,
-          rootContext,
-          startTime: Date.now(),
-        });
-
         // Record message count metric
         counters.messagesReceived.add(1, {
           "openclaw.message.channel": channel,
         });
 
-        logger.debug?.(`[otel] Root span started for session=${sessionKey}`);
-      } catch {
-        // Never let telemetry errors break the main flow
+        // End the span immediately — this is an audit record, not a parent span
+        messageSpan.setStatus({ code: SpanStatusCode.OK });
+        messageSpan.end();
+
+        logger.debug?.(`[otel] Message received span recorded for channel=${channel}, session=${sessionKey}`);
+      } catch (err) {
+        logger.warn?.(`[otel] message_received hook error: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
-    { priority: 100 } // High priority — run first to establish context
+    { priority: 100 } // High priority — run first for security detection
   );
 
   logger.info("[otel] Registered message_received hook (via api.on)");
 
   // ── before_agent_start ───────────────────────────────────────────
-  // Creates an "agent turn" child span under the root request span.
+  // PRIMARY ROOT SPAN CREATOR — fires on the shared agent runtime path
+  // for ALL channels (Gateway UI, Slack, Telegram, API, etc.).
+  //
+  // Creates both the root "openclaw.request" span and the child
+  // "openclaw.agent.turn" span. This is the ONLY hook responsible for
+  // establishing the trace hierarchy that tool_result_persist and
+  // agent_end depend on.
 
   api.on(
     "before_agent_start",
@@ -135,8 +162,31 @@ export function registerHooks(
         const agentId = event?.agentId || ctx?.agentId || "unknown";
         const model = event?.model || "unknown";
 
-        const sessionCtx = sessionContextMap.get(sessionKey);
-        const parentContext = sessionCtx?.rootContext || context.active();
+        // Check if a root span already exists for this session key
+        // (e.g., from a previous agent turn in a multi-turn conversation)
+        let sessionCtx = sessionContextMap.get(sessionKey);
+
+        if (!sessionCtx) {
+          // Create the root request span — this is the primary path for ALL channels
+          const rootSpan = tracer.startSpan("openclaw.request", {
+            kind: SpanKind.SERVER,
+            attributes: {
+              "openclaw.session.key": sessionKey,
+              "openclaw.message.direction": "inbound",
+            },
+          });
+
+          const rootContext = trace.setSpan(context.active(), rootSpan);
+
+          sessionCtx = {
+            rootSpan,
+            rootContext,
+            startTime: Date.now(),
+          };
+          sessionContextMap.set(sessionKey, sessionCtx);
+
+          logger.debug?.(`[otel] Root span created in before_agent_start for session=${sessionKey}`);
+        }
 
         // Create agent turn span as child of root span
         const agentSpan = tracer.startSpan(
@@ -149,32 +199,21 @@ export function registerHooks(
               "openclaw.agent.model": model,
             },
           },
-          parentContext
+          sessionCtx.rootContext
         );
 
-        const agentContext = trace.setSpan(parentContext, agentSpan);
+        const agentContext = trace.setSpan(sessionCtx.rootContext, agentSpan);
 
         // Store agent span context for tool spans
-        if (sessionCtx) {
-          sessionCtx.agentSpan = agentSpan;
-          sessionCtx.agentContext = agentContext;
-        } else {
-          // No root span (e.g., heartbeat) — create a standalone context
-          sessionContextMap.set(sessionKey, {
-            rootSpan: agentSpan,
-            rootContext: agentContext,
-            agentSpan,
-            agentContext,
-            startTime: Date.now(),
-          });
-        }
+        sessionCtx.agentSpan = agentSpan;
+        sessionCtx.agentContext = agentContext;
 
         // Register in activeAgentSpans for diagnostics integration
         activeAgentSpans.set(sessionKey, agentSpan);
 
         logger.debug?.(`[otel] Agent turn span started: agent=${agentId}, session=${sessionKey}`);
-      } catch {
-        // Silently ignore
+      } catch (err) {
+        logger.warn?.(`[otel] before_agent_start hook error: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       // Return undefined — don't modify system prompt
@@ -271,8 +310,8 @@ export function registerHooks(
         }
 
         span.end();
-      } catch {
-        // Never let telemetry errors break the main flow
+      } catch (err) {
+        logger.warn?.(`[otel] tool_result_persist hook error: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       // Return undefined to keep the tool result unchanged
@@ -429,8 +468,8 @@ export function registerHooks(
         activeAgentSpans.delete(sessionKey);
 
         logger.debug?.(`[otel] Trace completed for session=${sessionKey}`);
-      } catch {
-        // Silently ignore
+      } catch (err) {
+        logger.warn?.(`[otel] agent_end hook error: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
     { priority: -100 }
@@ -476,8 +515,8 @@ export function registerHooks(
 
         span.setStatus({ code: SpanStatusCode.OK });
         span.end();
-      } catch {
-        // Silently ignore telemetry errors
+      } catch (err) {
+        logger.warn?.(`[otel] command event hook error: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
     {
@@ -492,7 +531,7 @@ export function registerHooks(
 
   api.registerHook(
     "gateway:startup",
-    async (event: any) => {
+    async (_event: any) => {
       try {
         const span = tracer.startSpan("openclaw.gateway.startup", {
           kind: SpanKind.INTERNAL,
@@ -503,8 +542,8 @@ export function registerHooks(
         });
         span.setStatus({ code: SpanStatusCode.OK });
         span.end();
-      } catch {
-        // Silently ignore
+      } catch (err) {
+        logger.warn?.(`[otel] gateway startup hook error: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
     {
@@ -525,7 +564,9 @@ export function registerHooks(
         try {
           ctx.agentSpan?.end();
           if (ctx.rootSpan !== ctx.agentSpan) ctx.rootSpan?.end();
-        } catch { /* ignore */ }
+        } catch (err) {
+          logger.warn?.(`[otel] Stale context cleanup error for session=${key}: ${err instanceof Error ? err.message : String(err)}`);
+        }
         sessionContextMap.delete(key);
         logger.debug?.(`[otel] Cleaned up stale trace context for session=${key}`);
       }
