@@ -60,7 +60,7 @@ const sessionContextMap = new Map<string, SessionTraceContext>();
 export function registerHooks(
   api: any,
   telemetry: TelemetryRuntime,
-  _config: OtelObservabilityConfig
+  config: OtelObservabilityConfig
 ): void {
   const { tracer, counters, histograms } = telemetry;
   const logger = api.logger;
@@ -386,6 +386,38 @@ export function registerHooks(
         const totalTokens = totalInputTokens + totalOutputTokens + cacheReadTokens + cacheWriteTokens;
         logger.debug?.(`[otel] agent_end tokens: input=${totalInputTokens}, output=${totalOutputTokens}, cache_read=${cacheReadTokens}, cache_write=${cacheWriteTokens}, model=${model}`);
 
+        // Content capture (gen_ai.prompt and gen_ai.completion)
+        let inputContent = "";
+        let outputContent = "";
+        if (config.captureContent && messages.length > 0) {
+          // Extract last user message as input
+          const userMessages = messages.filter((m: any) => m?.role === "user");
+          if (userMessages.length > 0) {
+            const lastUserMsg = userMessages[userMessages.length - 1];
+            if (typeof lastUserMsg.content === "string") {
+              inputContent = lastUserMsg.content;
+            } else if (Array.isArray(lastUserMsg.content)) {
+              inputContent = lastUserMsg.content
+                .filter((c: any) => c.type === "text")
+                .map((c: any) => c.text || "")
+                .join("\n");
+            }
+          }
+          // Extract last assistant message as output
+          const assistantMessages = messages.filter((m: any) => m?.role === "assistant");
+          if (assistantMessages.length > 0) {
+            const lastAssistantMsg = assistantMessages[assistantMessages.length - 1];
+            if (typeof lastAssistantMsg.content === "string") {
+              outputContent = lastAssistantMsg.content;
+            } else if (Array.isArray(lastAssistantMsg.content)) {
+              outputContent = lastAssistantMsg.content
+                .filter((c: any) => c.type === "text")
+                .map((c: any) => c.text || "")
+                .join("\n");
+            }
+          }
+        }
+
         const sessionCtx = sessionContextMap.get(sessionKey);
 
         // End the agent turn span
@@ -422,6 +454,14 @@ export function registerHooks(
           }
           if (diagUsage?.context?.used) {
             agentSpan.setAttribute("openclaw.context.used", diagUsage.context.used);
+          }
+
+          // Content capture (GenAI semantic conventions)
+          if (inputContent) {
+            agentSpan.setAttribute("gen_ai.prompt", inputContent.slice(0, 10000));
+          }
+          if (outputContent) {
+            agentSpan.setAttribute("gen_ai.completion", outputContent.slice(0, 10000));
           }
 
           // Record metrics only if we didn't get them from diagnostics

@@ -1,6 +1,6 @@
 {
   "name": "@aigentsphere/openclaw-otel-observability",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "OpenTelemetry observability plugin for OpenClaw — traces, metrics, and logs for your AI agent using OpenLLMetry",
   "type": "module",
   "main": "dist/index.js",
