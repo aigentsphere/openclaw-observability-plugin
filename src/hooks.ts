@@ -499,6 +499,18 @@ export function registerHooks(
         if (sessionCtx?.rootSpan && sessionCtx.rootSpan !== sessionCtx.agentSpan) {
           const totalMs = Date.now() - sessionCtx.startTime;
           sessionCtx.rootSpan.setAttribute("openclaw.request.duration_ms", totalMs);
+
+          // Propagate content and key metrics to root span for Langfuse trace-level mapping
+          if (inputContent) {
+            sessionCtx.rootSpan.setAttribute("gen_ai.prompt", inputContent.slice(0, 10000));
+          }
+          if (outputContent) {
+            sessionCtx.rootSpan.setAttribute("gen_ai.completion", outputContent.slice(0, 10000));
+          }
+          sessionCtx.rootSpan.setAttribute("gen_ai.usage.input_tokens", totalInputTokens);
+          sessionCtx.rootSpan.setAttribute("gen_ai.usage.output_tokens", totalOutputTokens);
+          sessionCtx.rootSpan.setAttribute("gen_ai.response.model", model);
+
           sessionCtx.rootSpan.setStatus({ code: SpanStatusCode.OK });
           sessionCtx.rootSpan.end();
         }
